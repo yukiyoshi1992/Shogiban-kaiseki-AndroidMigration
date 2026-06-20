@@ -89,6 +89,19 @@
 3. 並行して、前PJ（`Shogiban-kaiseki-tool`）から認識ロジック・モデルを本リポジトリに複製する作業（`02 API開発/`配下にFastAPIサーバとして構築）
 4. xlsx本体（今後の検討事項シート）への直接反映が必要かは、ユーザーから希望があれば対応（現時点では`アーキテクチャ検討.md`への軽量記録のみ）
 
+## セッション2 続き：Androidプロジェクト作成（2026-06-20）
+
+ユーザーがAndroid Studioをインストールし、`03 設計・開発/01 Androidアプリ開発/`配下にプロジェクトを作成（テンプレート：Empty Activity / Compose、パッケージ名`com.example.shogiban_kaiseki_appli`——後で正式なパッケージ名に変える可能性あり）。Claude側でcommit&push済み。
+
+**発生した問題と対応**：NAS共有（UNCパス、フォルダ名にスペース・日本語含む）上でAndroid Studioがファイル保存に失敗（`Cannot save ...build.gradle.kts. Unable to create a backup file`）。IntelliJ系IDEの「Safe Write」機能（保存時に`~`バックアップファイルを作る仕組み）がSMB共有上で失敗したことが原因と推定。
+- 対応として「Revert change」を選択 → その後の保存テスト（`MainActivity.kt`に`//test`追記→保存）でファイルが正常に更新されることを確認（Claude側でファイル内容を直接読んで確認済み）。**現時点ではNASのまま開発を継続できている**。
+- 再発した場合の対応策（試した順）：①IDEの「Revert change」→再試行、②`Ctrl+Shift+A`→Registry→`safe.write`を無効化、③それでも直らなければCドライブへのローカルクローンに切替（`git clone https://github.com/yukiyoshi1992/Shogiban-kaiseki-AndroidMigration.git`）。
+- **次回また同じエラーが出たら**、まずこの3案を順に試す。直らない場合はローカルクローン方式が確実な代替策。
+
+**今後の作業分担（ユーザーと合意済み）**：
+- ソースコード（Kotlin/Gradle/XML等）：claude codeが直接ファイル編集する
+- Android Studioの画面操作（プロジェクト作成、実行ボタン、実機権限許可等）：ユーザーがClaudeの指示に従って操作
+
 ## 中断・再開について
 
 次回セッション開始時は「`CLAUDE.md`と`01 企画・管理/handover.md`を読んで状況を整理して」と伝えれば、要件定義の続きから再開できる。直近の状態は「セッション2」セクションの「提示し合意したプロセス」を参照し、未完了の番号から続行する。
