@@ -98,6 +98,8 @@
 - 再発した場合の対応策（試した順）：①IDEの「Revert change」→再試行、②`Ctrl+Shift+A`→Registry→`safe.write`を無効化、③それでも直らなければCドライブへのローカルクローンに切替（`git clone https://github.com/yukiyoshi1992/Shogiban-kaiseki-AndroidMigration.git`）。
 - **次回また同じエラーが出たら**、まずこの3案を順に試す。直らない場合はローカルクローン方式が確実な代替策。
 
+**追加で発覚した問題と解決（2026-06-20）**：Gradle同期で「プロジェクトパスに非ASCII文字（日本語）が含まれているため」AGPがビルドを停止する問題が発生（`03 設計・開発/01 Androidアプリ開発/`という日本語パスが原因）。エラーメッセージに記載の回避策`android.overridePathCheck=true`を`gradle.properties`に追加して解決。**実機（OPPO端末）でアプリが正常起動し「Hello world」表示を確認済み**。USB実機接続の手順（開発者向けオプション有効化→USBデバッグON→USB接続モードを「ファイル転送」に→PC側で許可）も一通り完了。これで**NAS共有パス上でのAndroid開発の土台（Gradle同期・実機ビルド・実行）が確立**。今後同種のエラーが出たら、まずこの`android.overridePathCheck=true`の存在を確認すること。
+
 **今後の作業分担（ユーザーと合意済み）**：
 - ソースコード（Kotlin/Gradle/XML等）：claude codeが直接ファイル編集する
 - Android Studioの画面操作（プロジェクト作成、実行ボタン、実機権限許可等）：ユーザーがClaudeの指示に従って操作
