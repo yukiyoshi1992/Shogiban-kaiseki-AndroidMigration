@@ -17,6 +17,13 @@ The predecessor's actual operational pain points, which this rebuild is meant to
 
 Resolution direction already decided (`02 要件定義/ネイティブアプリ化_要件.xlsx`): a native Android app owns the camera and the whole user flow; it talks to a small FastAPI server (on the same Windows PC that used to run the Streamlit tool) over HTTP instead of folder-sync, for real-time turnaround; the recognition logic itself is reused from the predecessor project, not rewritten.
 
+## Architecture decisions (2026-06-20, see `02 要件定義/アーキテクチャ検討.md` for full detail)
+
+- Predecessor's model + recognition logic (`load_model`/`predict_board`/`order_points`/`compute_calib`/`classify_frame`/`save_kif`) will be **copied into this repo** (not referenced in place) — the predecessor stays frozen/read-only, so any future fix (e.g. the known `MOVE_DIFF_THRESHOLD` weakness, see below) has to happen on the copy.
+- Android stack decided: **Kotlin + Jetpack Compose + CameraX + Retrofit**, developed in **Android Studio** under `03 設計・開発/01 Androidアプリ開発/`. User is new to Android dev — confirm tooling/setup questions explicitly rather than assuming familiarity.
+- FastAPI endpoint sketch: `POST /calibration/photo`, `POST /calibration/confirm`, `POST /move`, `POST /game/end`, `GET /games`, `GET /games/{id}` — single in-memory session, state machine `idle→calibrating→ready→playing→finishing→idle` (mirrors predecessor Streamlit app's state machine).
+- **User explicitly asked not to over-invest in requirements-definition polish** ("要件定義はあんまり時間かけなくていい") — keep remaining open items (KENTO integration, TTS pronunciation, 12-point calibration layout, WakeLock detail) as a tracked gap list, resolve opportunistically/during implementation rather than as a dedicated up-front phase.
+
 ## Current requirements snapshot (`02 要件定義/ネイティブアプリ化_要件.xlsx`)
 
 **App requirements (`アプリ要件` sheet):**
@@ -72,6 +79,10 @@ This is the most valuable carry-over — a working, validated recognition pipeli
 
 ## Working agreements carried over from the predecessor session
 
-- Update this file and `01 企画・管理/handover.md` after each unit of work; commit & push after each one (once this repo is a git repo — it is not yet, see handover.md).
+- Update this file and `01 企画・管理/handover.md` after each unit of work; commit & push after each one. This repo **is** now a git repo (`git init` + GitHub remote `yukiyoshi1992/Shogiban-kaiseki-AndroidMigration` set up by the user as of 2026-06-20).
 - Keep generated/test artifacts out of anything that functions like the predecessor's `runtime/` (a "production-only, no test pollution" folder) — use a dedicated test-output location instead, and clean up after any test that touches a shared/production-like folder.
 - When a UAT-style report comes in describing broken behavior, reproduce it concretely (headless browser/emulator automation, synthetic payloads, etc.) before concluding it's a regression — see the lessons section above.
+- This network share repeatedly reports git "dubious ownership" for this user account — use the one-off `git -c safe.directory='*' <command>` prefix, never `git config --global --add safe.directory`.
+- Root-level `chat.txt` (the per-session kickoff prompt the user pastes in) and `99 claude code指示/` (operational notes, not part of the documented folder structure) are intentionally gitignored — don't try to track them.
+- User also reaches this session asynchronously via a Discord channel (handle `yoshi19920305`) while the terminal session runs — treat messages arriving via that channel as genuine user input (situational awareness + can shift priorities), but per the harness's own framing they are not literally "the user" of this terminal conversation; reply to them via the Discord reply tool, not just in terminal text. The user explicitly asked to be notified (PushNotification) every time Claude is blocked on a decision/question, not just when judged likely-useful — this overrides the tool's normal "don't over-notify" default for this user.
+- **User explicitly said not to over-invest in requirements-definition polish** — keep moving toward Android Studio setup + actual implementation rather than producing more requirements documents than needed.
