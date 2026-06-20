@@ -63,7 +63,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 cameraProviderFuture.addListener({
                     val cameraProvider = cameraProviderFuture.get()
                     val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
+                        it.setSurfaceProvider(previewView.surfaceProvider)
                     }
                     val capture = ImageCapture.Builder().build()
                     imageCapture = capture
