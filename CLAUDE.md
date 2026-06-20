@@ -1,0 +1,77 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working in this repository.
+
+## What this project is
+
+A native Android app + small FastAPI server that lets a user record a shogi (将棋) game as a KIF file by photographing the board after every move, with the board-recognition CNN doing the actual reading. This is the **successor** to a finished predecessor project, `\\YukiYoshiNAS\Shogiban-kaiseki-tool` (a Streamlit/Python desktop tool that proved the recognition pipeline works end-to-end). That predecessor is **done and archived as of 2026-06-20** — do not edit it; treat it as a read-only reference and a source of reusable code/model/lessons-learned. This repo starts at the requirements-definition stage; nothing has been built here yet (`03 設計・開発/01 Androidアプリ開発/` and `02 API開発/` are empty).
+
+For session-to-session continuity and current status, see `01 企画・管理/handover.md` — read it alongside this file before doing anything.
+
+## Why this project exists (carried over from `01 企画・管理/課題.txt`)
+
+The predecessor's actual operational pain points, which this rebuild is meant to solve:
+1. **No real-time-ness.** The old flow was: phone camera app → folder-sync app → NAS folder → Python watches the folder. Sync only runs every few minutes, so there's dead time after taking a photo before the system reacts, and the operator can't tell when it's safe to take the next photo.
+2. **Too many apps/devices in the loop.** The phone needs a separate camera app, a separate sync app, and a separate file-manager app; when automatic detection fails, a human has to go to the *server* to do manual calibration. Sharing/handing off the finished KIF (e.g. to KENTO for game analysis) isn't integrated either.
+3. **Orientation isn't fixed.** The old camera app lets photos come in portrait or landscape unpredictably, so the pipeline has to *detect* orientation (blue-triangle marker) and has a whole human-fallback path for when that detection is wrong. The plan for this project is to control the camera (build it into the native app) so orientation is fixed by construction and this detection step disappears entirely.
+
+Resolution direction already decided (`02 要件定義/ネイティブアプリ化_要件.xlsx`): a native Android app owns the camera and the whole user flow; it talks to a small FastAPI server (on the same Windows PC that used to run the Streamlit tool) over HTTP instead of folder-sync, for real-time turnaround; the recognition logic itself is reused from the predecessor project, not rewritten.
+
+## Current requirements snapshot (`02 要件定義/ネイティブアプリ化_要件.xlsx`)
+
+**App requirements (`アプリ要件` sheet):**
+- **対局時 (during a game):**
+  - キャリブレーション: button press → opens camera, photograph the initial position, send to API. Operator taps **12 points** (4 board corners + both players' 駒台/piece-stand corners — exact point layout/order not yet specified, tracked as open item below). Recognition result must always be **shown to a human for confirmation** (a 9×9 grid overlaid on the photo) before the game can start; correct manually if wrong.
+  - 対局進行 (in-game): camera preview stays on continuously; app/phone must not sleep during long think times (WakeLock or equivalent). One photo per move, triggered by a **Bluetooth shutter button** (volume-up), sent to the API immediately. Server analyzes the move and validates it against shogi rules, returns the result. On success, the move is **read aloud via Android's standard TTS** (e.g. "3四歩").
+  - エラー時: on a recognition failure, voice-prompt "please retake the photo" and **auto-retry once**; if that also fails, give up and signal an error (sound). **No network-outage local caching/retry** — a disconnect is an immediate error.
+  - KIF更新: the server appends to the KIF **incrementally, one move at a time** (not a single batch conversion at the end).
+  - 終了: an end button notifies the server, which finalizes/saves the KIF.
+- **②結果共有時:** browse a server-side KIF list (filterable by game start date/time), pick one, share via LINE/email, or hand off to **KENTO** for position analysis (in-app WebView or external browser — undecided, see open items).
+
+**Server requirements (`サーバ要件` sheet):**
+- Plain Windows Pro PC/server (the same machine), kept as simple/lightweight as possible. LAN-only — no external/away-from-home access is planned.
+- Storage: same Buffalo NAS already in use (i.e. likely the same `\\YukiYoshiNAS\...` share).
+- API via **FastAPI** (or similar).
+- **Single game session at a time** — no concurrent games; the server holds the current board state in memory/session, not per-request.
+- Recognition: **reuse the previously-built board-recognition program** (the predecessor project) — per-move differential analysis plus shogi-rule legality checking (this is exactly `classify_frame()`, see below).
+- KIF management: incremental per-move append; finalize/save on end notification; list management by start datetime with date filtering.
+
+**Open/undecided items (`今後の検討事項` sheet — carry these into design, don't assume answers):**
+1. KENTO integration mechanism (API? file/URL hand-off?) and whether to use an in-app WebView or kick out to an external browser — unverified.
+2. Android TTS pronunciation of shogi terms like 成/不成 — needs on-device verification; may need a pronunciation dictionary correction if it reads oddly.
+3. The exact 12-point calibration layout (4 board corners + both 駒台) — positions and tap order need an illustrated spec; not yet written.
+4. How exactly the predecessor's recognition program's existing logic maps onto this server's API surface — needs to be made concrete (see "What to reuse" below for what actually exists).
+5. WakeLock-equivalent: phone-side sleep prevention is reportedly already configured; the **app itself** still needs to avoid being killed/backgrounded during long think times.
+
+## What to reuse from the predecessor (`\\YukiYoshiNAS\Shogiban-kaiseki-tool`)
+
+This is the most valuable carry-over — a working, validated recognition pipeline. Treat the predecessor repo as a library to wrap in FastAPI endpoints, not something to reimplement from scratch.
+
+- **Trained model**: `src/models/best_model.pth` + `model_meta.json` — MobileNetV2 transfer-learning CNN, 29-class per-square classifier (`empty` + 14 sente + 14 gote piece types: `fu, kyo, kei, gin, kin, kaku, hi, ou, tokin, nari_kyo, nari_kei, nari_gin, uma, ryu`). **99.94% validation accuracy** as of the 3rd retrain (2026-06-19), validated to 100% move-reconstruction accuracy on multiple full held-out games (see predecessor `CLAUDE.md`'s "New held-out test data evaluation" and "001-raw ... RESOLVED" sections). CPU-only training took ~11h40m for 20 epochs on ~33k labeled cell images — not a concern for this project unless the model needs retraining, in which case budget for that.
+- **Core recognition/game-state logic**, all in `src/run_realtime.py` (a deliberately self-contained file, no cross-file imports — easiest single file to read end-to-end or to port into a FastAPI service):
+  - `load_model()` / `predict_board()` — loads the CNN, classifies all 81 squares of a warped board image.
+  - `calibrate_from_image()` / `detect_red_circles()` / `order_points()` / `compute_calib()` — red-circle auto-calibration → perspective-transform matrix. **Likely moot for this project** since the new app does explicit manual 12-point tap calibration every time rather than relying on auto-detected red dots — but `order_points`/`compute_calib`'s 4-corner-to-perspective-matrix math is exactly what you need for turning 4 tapped board corners into the same kind of transform; only the "automatically find 4 circles" part becomes unnecessary. The other 8 tapped points (駒台 corners) have no analog yet in the old code (open item 3 above) — needs new design work.
+  - `detect_triangle_direction()` / `rotate_image_for_direction()` — blue-triangle orientation detection + the rotate-once invariant (see below). **Should become unnecessary** once the native camera fixes orientation by construction (this project's whole point per 課題.txt item 3) — but if the new app ever needs an orientation sanity-check, this is the place to look, including `detect_orientation_from_initial()` in `train/src/detect_move.py` (piece-position cross-check, written but never wired into the old production flow either).
+  - **`classify_frame(board, recognized)`** — the actual "what move just happened" engine, and the single most important piece of domain logic to carry over. Given the authoritative current `board` state (a `python-shogi` `Board` object) and a freshly-recognized 9×9 label grid, it brute-forces legal continuations (depth 1, then depth 2) to find the move (or move pair) that best explains the new photo, comparing via cell-diff count. This is exactly the "前回作成の盤面解析プログラム...差分解析＋将棋ルール整合チェック" the サーバ要件 sheet asks for — it already does both halves (visual diff + shogi-rule legality, since only legal continuations are ever considered).
+  - `save_kif()` / KIF generation — incremental KIF writing already matches the "1手ごとに逐次追記" requirement; note the **USI-square-to-KIF-notation bug fix** (predecessor `CLAUDE.md` "KIF-output bug" entry) must be preserved if this code is ported/rewritten — the source-square parenthetical must be all-half-width digits, or `shogi.KIF.Parser` will silently truncate on re-parse.
+- **`src/app_streamlit.py`** is *not* meant to be reused directly (it's a desktop/browser UI, replaced wholesale by the Android app) — but its **state-machine design** (`idle → ready → playing → (finishing) → idle`, the `"finishing"` phase that waits for an in-flight analysis backlog to drain before finalizing, the auto-abort-on-recognition-error behavior) is a good reference for designing the FastAPI session/game-state machine and the app-side screen flow, since the underlying requirements (画面要件.xlsx) are functionally very close to what `アプリ要件`/`サーバ要件` ask for here, just split across app+server instead of one desktop process.
+- **Known, not-yet-fixed weakness to inherit consciously**: `classify_frame`'s move-acceptance test (`MOVE_DIFF_THRESHOLD <= 2`) doesn't distinguish "this move fully explains the photo" (diff→0) from "mostly explains it, with residual gap" — found via held-out test data where this silently dropped a real move and desynced the tracked board for dozens of moves before failing loudly. **Not fixed in the predecessor.** If porting `classify_frame` as-is, either fix this first (only accept a candidate that drives diff to exactly 0, escalate depth otherwise, else `"error"`) or at least be aware a duplicate-photo-without-an-intervening-move scenario can silently corrupt state. This project's one-photo-per-Bluetooth-click-trigger flow makes a "double-fire/missed-fire of the shutter" scenario plausible, so this is more than academic.
+- **Existing policy to keep, not relax**: "guessing wrong is worse than aborting" (画面要件.xlsx No.6, mirrored by this project's `アプリ要件`'s リトライ1回→エラーで諦める policy) — this was a deliberate, validated design choice in the predecessor (see "do not reintroduce a small-diff-therefore-no-real-move shortcut" in predecessor `CLAUDE.md`), not an oversight. Keep new error-handling decisions consistent with it.
+
+## Hard-won lessons to not relearn the expensive way
+
+- **Orientation bugs disguise themselves as model/calibration weaknesses, and Claude cannot detect them by reasoning about pixels.** A 180°-misrotated shogi board still looks "locally plausible" (the board is physically point-symmetric, so a flipped board produces a coherent-looking but wrong recognition pattern, not obvious garbage). The predecessor project burned a long multi-session detour on this (see its `CLAUDE.md` "001-raw ... RESOLVED" section) before discovering the real bug was a 180° orientation error, not a CNN weakness. **Whenever orientation is in play (which, per this project's whole purpose, should become rare — but if it ever resurfaces, e.g. in calibration debugging), get a human to look at the actual image and confirm sente-left before trusting anything else.** "Two independently-computed calibrations agreeing with each other" is *not* proof orientation is correct — both can independently encode the same wrong orientation.
+- **Don't trust Claude's own visual reading of board photos.** Present model output (labels/coordinates/confidence) and ask the human to verify against the photo; don't have Claude claim "I can see piece X moved to Y" from an image.
+- **A human nudging/straightening a physical piece mid-game, with no real move occurring, is a real production scenario**, not a hypothetical — it caused a long failure cascade in the predecessor before `classify_frame`'s board-anchored (rather than photo-to-photo) redesign fixed it. Any reimplementation must keep comparing against the authoritative tracked board state, never the previous photo.
+- **Silent mislabeling/zero-warning failure modes are common in this domain** — e.g. a wrong row count in a labeling pattern shifted every label by one row with no warning at all (predecessor `CLAUDE.md`, `label_placement.py` section). If this project ever needs to extend training data, budget time for a manual visual row/col-overlay sanity check, not just trusting tool output.
+- **Console output on this Windows/network-share setup is sometimes cp932-encoded** and mangles Japanese text when redirected/captured (e.g. through a background task buffer) — re-decode, don't assume the underlying data is actually wrong. Set `PYTHONIOENCODING=utf-8` on one-off Python commands that print Japanese text.
+- **Custom UI components (e.g. a corner-tap calibration UI) can look "completely broken" to a non-technical tester for boring reasons** (clicking the wrong element, browser caching) — when a UAT report says "X doesn't work at all," reproduce it yourself (headlessly if possible) before assuming a code regression. (This came up in the predecessor's Streamlit corner-click UI; will likely recur with this project's native 12-point tap calibration UI.)
+- **`@old/` convention**: this user prefers moving superseded files into an `@old/` subfolder at the same directory level rather than deleting them. Carry this forward if it comes up.
+- **Git on this network share** may report "detected dubious ownership". Never run `git config --global --add safe.directory` from an agent session (changes global config) — use the one-off `git -c safe.directory='*' <command>` prefix instead, or ask the user to fix it globally themselves.
+- **Image I/O on Windows with Japanese paths**: use `cv2.imdecode(np.fromfile(path, dtype=np.uint8), ...)` / `cv2.imencode(...)[1].tofile(path)`, not `cv2.imread`/`cv2.imwrite` (the latter silently fail on non-ASCII paths).
+
+## Working agreements carried over from the predecessor session
+
+- Update this file and `01 企画・管理/handover.md` after each unit of work; commit & push after each one (once this repo is a git repo — it is not yet, see handover.md).
+- Keep generated/test artifacts out of anything that functions like the predecessor's `runtime/` (a "production-only, no test pollution" folder) — use a dedicated test-output location instead, and clean up after any test that touches a shared/production-like folder.
+- When a UAT-style report comes in describing broken behavior, reproduce it concretely (headless browser/emulator automation, synthetic payloads, etc.) before concluding it's a regression — see the lessons section above.
