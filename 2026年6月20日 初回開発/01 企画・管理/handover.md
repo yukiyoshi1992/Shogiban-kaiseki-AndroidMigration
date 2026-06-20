@@ -114,6 +114,27 @@
 - ソースコード（Kotlin/Gradle/XML等）：claude codeが直接ファイル編集する
 - Android Studioの画面操作（プロジェクト作成、実行ボタン、実機権限許可等）：ユーザーがClaudeの指示に従って操作
 
+## セッション3（2026-06-21、CameraX撮影→API送信の最小導線実装）
+
+`chat.txt`経由で前回引継ぎ対応の依頼を受けて再開。
+
+### このセッションでやったこと
+1. Discordチャンネルが不調（ボットがDMに反応せずステータス灰色）になる事象が発生。原因はユーザーが以前のDiscordサーバーを削除したため、ボットとユーザーが共有するサーバーがなくなったこと（Discordの仕様上、ボットはサーバーを共有しているユーザーにしかDMできない）。ユーザーが新規サーバー作成→OAuth2のbotスコープで招待→`/reload-plugins`実行で復旧確認済み。
+2. **Task #8（CameraX撮影→API送信の最小導線）を実装**：
+   - `gradle/libs.versions.toml`・`app/build.gradle.kts`にCameraX(core/camera2/lifecycle/view)・Retrofit+converter-gson・OkHttp logging-interceptor・kotlinx-coroutines-androidを追加
+   - `AndroidManifest.xml`に`CAMERA`・`INTERNET`権限と`android.hardware.camera`機能要求を追加
+   - `network/ApiConfig.kt`（サーバのベースURL。**現在プレースホルダ`http://192.168.1.100:8000/`、ユーザーの実際のLAN IPへの書き換えが必要**）
+   - `network/PhotoApiService.kt`・`network/RetrofitClient.kt`（Retrofitで`/photo`へmultipart POST）
+   - `camera/CameraScreen.kt`（CameraXのPreviewView表示＋シャッターボタンで撮影→`takePicture`→撮影完了コールバックで自動アップロード、状態をテキスト表示）
+   - `MainActivity.kt`を書き換え、起動時にカメラ権限をランタイムリクエストする`CameraPermissionGate`を追加。許可済みなら`CameraScreen`を表示
+3. **ビルド確認は未完**：NAS共有のUNCパス上でPowerShell/cmdからGradle CLIビルド（`gradlew.bat :app:compileDebugKotlin`）を試したが、UNCパス非対応・ドライブマッピングの問題で断念（時間をかけすぎないよう撤退）。コードは目視レビュー済みだが、**実際のコンパイル確認はユーザーがAndroid Studioで同期・実行するまで未検証**。
+
+### 次回／ユーザーに依頼すること
+1. **Android Studioでこのプロジェクトを開き、Gradle Sync→実機(OPPO)で実行**して、コンパイルエラーがないか・カメラプレビューが映るか確認してもらう（コンパイルエラーが出た場合は内容を貼ってもらえれば修正する）
+2. **PCのLAN IPアドレスを確認**（コマンドプロンプトで`ipconfig`→「IPv4 アドレス」）→`network/ApiConfig.kt`の`BASE_URL`をそのIPに書き換える（現在`192.168.1.100`はダミー値）
+3. **FastAPIサーバを起動**：`03 設計・開発/02 API開発/`で`pip install -r requirements.txt`→`uvicorn main:app --host 0.0.0.0 --port 8000`
+4. スマホとPCが同じWi-Fi/LANに接続されていることを確認の上、アプリでシャッターを押し、PC側`received_photos/`フォルダに画像が保存されるか確認
+
 ## 中断・再開について
 
-次回セッション開始時は「`CLAUDE.md`と`01 企画・管理/handover.md`を読んで状況を整理して」と伝えれば、要件定義の続きから再開できる。直近の状態は「セッション2」セクションの「提示し合意したプロセス」を参照し、未完了の番号から続行する。
+次回セッション開始時は「`CLAUDE.md`と`01 企画・管理/handover.md`を読んで状況を整理して」と伝えれば続きから再開できる。直近の状態は「セッション3」セクションの「次回/ユーザーに依頼すること」から続行する。
