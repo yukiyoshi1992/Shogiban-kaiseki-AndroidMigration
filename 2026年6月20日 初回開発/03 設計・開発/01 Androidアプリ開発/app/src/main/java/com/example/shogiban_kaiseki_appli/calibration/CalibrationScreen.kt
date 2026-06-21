@@ -17,12 +17,10 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -174,12 +172,13 @@ fun CalibrationScreen(
             hint = tappingHint,
             onPointsChanged = { tapPoints = it },
             onRetake = { resetToCamera() },
-            onSubmit = { boxSizePx ->
+            onSubmit = {
                 phase = CalibPhase.SUBMITTING
+                val bmp = capturedBitmap!!
                 val scaled = tapPoints.map { p ->
                     listOf(
-                        (p.x / boxSizePx.width * originalSize.width).toDouble(),
-                        (p.y / boxSizePx.height * originalSize.height).toDouble()
+                        (p.x / bmp.width * originalSize.width).toDouble(),
+                        (p.y / bmp.height * originalSize.height).toDouble()
                     )
                 }
                 handleManualResult(capturedFile!!, scaled)
@@ -296,16 +295,49 @@ private fun computeZoomCrop(anchorBitmap: Offset, bitmap: Bitmap): ZoomCrop {
     return ZoomCrop(left, top, cropW, cropH)
 }
 
-private fun ZoomCrop.toBitmapPos(displayPos: Offset, boxSize: IntSize): Offset {
-    val fracX = displayPos.x / boxSize.width.coerceAtLeast(1)
-    val fracY = displayPos.y / boxSize.height.coerceAtLeast(1)
-    return Offset(left + fracX * width, top + fracY * height)
+/**
+ * ボックス内で実際に画像が表示されている矩形（box座標系）。Image(contentScale=Fit、既定値)と
+ * 同じロジック：箱と画像のアスペクト比が一致しない場合、余白（レターボックス/ピラーボックス）ができる。
+ *
+ * 2026-06-21、実機デバッグ表示の実測値から判明：このBoxは元々「箱の高さ＝幅/画像アスペクト比」
+ * （`boxHeightDp = maxWidth / aspect`）として、箱と画像のアスペクト比を一致させる前提で設計されて
+ * いたが、画面の縦スペースが足りない（ヒントテキスト等で消費される）場合はその高さ要求が
+ * 親のColumnの`weight(1f)`で確保できる範囲に収まらずクランプされ、実際のbox高さが意図した値より
+ * 低くなる（実測例：要求約1920pxに対し実測1510px）。この結果、箱の中の画像はContentScale.Fitにより
+ * 左右に余白ができた状態で表示されるが、従来の座標変換（boxサイズ＝画像表示範囲とみなす単純比例）は
+ * この余白を考慮しておらず、タップ位置が常に実際の画像上の位置とズレるバグの真因だった
+ * （2回の独立したUI再設計でも再発し続けていたのは、この前提自体がどちらにも共通していたため）。
+ * 箱の高さを画像アスペクトに無理に合わせようとするのではなく、実際のboxサイズに対して
+ * このfitRectを都度計算し、タップ⇄画像座標の変換は必ずこれを経由するようにした。
+ */
+private data class FitRect(val left: Float, val top: Float, val width: Float, val height: Float)
+
+private fun computeFitRect(boxSize: IntSize, contentWidth: Float, contentHeight: Float): FitRect {
+    val boxW = boxSize.width.toFloat().coerceAtLeast(1f)
+    val boxH = boxSize.height.toFloat().coerceAtLeast(1f)
+    val boxAspect = boxW / boxH
+    val contentAspect = contentWidth / contentHeight
+    return if (boxAspect > contentAspect) {
+        val h = boxH
+        val w = h * contentAspect
+        FitRect((boxW - w) / 2f, 0f, w, h)
+    } else {
+        val w = boxW
+        val h = w / contentAspect
+        FitRect(0f, (boxH - h) / 2f, w, h)
+    }
 }
 
-private fun ZoomCrop.toDisplayPos(bitmapPos: Offset, boxSize: IntSize): Offset {
-    val fracX = (bitmapPos.x - left) / width
-    val fracY = (bitmapPos.y - top) / height
-    return Offset(fracX * boxSize.width, fracY * boxSize.height)
+/** 表示座標（box座標系）→ コンテンツ内座標（0..contentWidth/Height）。fitRectの外（余白）ならnull。 */
+private fun FitRect.displayToContent(displayPos: Offset, contentWidth: Float, contentHeight: Float): Offset? {
+    val localX = displayPos.x - left
+    val localY = displayPos.y - top
+    if (localX < 0f || localY < 0f || localX > width || localY > height) return null
+    return Offset(localX / width * contentWidth, localY / height * contentHeight)
+}
+
+private fun FitRect.contentToDisplay(contentPos: Offset, contentWidth: Float, contentHeight: Float): Offset {
+    return Offset(left + contentPos.x / contentWidth * width, top + contentPos.y / contentHeight * height)
 }
 
 /**
@@ -318,19 +350,19 @@ private fun ZoomCrop.toDisplayPos(bitmapPos: Offset, boxSize: IntSize): Offset {
 private fun TappingStep(
     modifier: Modifier,
     bitmap: Bitmap,
-    points: List<Offset>,
+    points: List<Offset>, // ビットマップ画素座標系（decodeForDisplay()が返したbitmapそのものの座標）
     hint: String,
     onPointsChanged: (List<Offset>) -> Unit,
     onRetake: () -> Unit,
-    onSubmit: (boxSizePx: PixelSize) -> Unit
+    onSubmit: () -> Unit
 ) {
-    val aspect = bitmap.width.toFloat() / bitmap.height.toFloat()
-    var measuredSize by remember { mutableStateOf(PixelSize(1, 1)) }
+    val bitmapW = bitmap.width.toFloat()
+    val bitmapH = bitmap.height.toFloat()
+    var measuredSize by remember { mutableStateOf(IntSize(1, 1)) }
     var zoomAnchorBitmap by remember { mutableStateOf<Offset?>(null) }
-    val baseScale = bitmap.width.toFloat() / measuredSize.width.coerceAtLeast(1)
-    // 2026-06-21、過去2回の修正（ドラッグ式→タップズーム式、pointerInput再起動回避）でも
-    // 「確定した点の位置がズレる」症状が再現したため、これ以上推測で直さず、実際の値を
-    // 画面に出して次回実機テストで実測してもらう（CLAUDE.mdの「診断してから直す」方針）。
+    // 2026-06-21、実機デバッグ表示の実測値から「箱の表示領域＝box全体」という前提が間違っていた
+    // ことが判明（上のFitRectのコメント参照）。原因確定後もこの表示はそのまま残し、次の実機テストで
+    // 数値が正しくなったことを確認できるようにする。
     var debugInfo by remember { mutableStateOf("") }
 
     // pointerInputのkey変更による再起動タイミングに依存すると、タップ直後の状態更新が
@@ -340,7 +372,6 @@ private fun TappingStep(
     // 再起動タイミングの問題を構造的に回避する（2026-06-21）。
     val currentCrop = rememberUpdatedState(zoomAnchorBitmap?.let { computeZoomCrop(it, bitmap) })
     val currentPoints = rememberUpdatedState(points)
-    val currentBaseScale = rememberUpdatedState(baseScale)
     val currentMeasuredSize = rememberUpdatedState(measuredSize)
 
     Column(modifier = modifier.fillMaxSize()) {
@@ -362,72 +393,86 @@ private fun TappingStep(
                 style = MaterialTheme.typography.bodySmall
             )
         }
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth().weight(1f)) {
-            val boxHeightDp = maxWidth / aspect
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .onSizeChanged { measuredSize = it }
+                .pointerInput(Unit) {
+                    detectTapGestures { tapPos ->
+                        val boxSize = currentMeasuredSize.value
+                        val fitRect = computeFitRect(boxSize, bitmapW, bitmapH)
+                        val cropNow = currentCrop.value
+                        if (cropNow == null) {
+                            if (currentPoints.value.size < 4) {
+                                val anchor = fitRect.displayToContent(tapPos, bitmapW, bitmapH)
+                                debugInfo = "①ズーム開始 disp=$tapPos boxSize=$boxSize fitRect=$fitRect → anchor=$anchor"
+                                if (anchor != null) zoomAnchorBitmap = anchor
+                            }
+                        } else {
+                            // ズーム中も表示領域は同じfitRect（クロップ矩形は常に元画像と同じアスペクト比のため）。
+                            // fitRect内でのタップ位置の比率を、クロップ矩形（ビットマップ座標）に適用する。
+                            val localX = ((tapPos.x - fitRect.left) / fitRect.width).coerceIn(0f, 1f)
+                            val localY = ((tapPos.y - fitRect.top) / fitRect.height).coerceIn(0f, 1f)
+                            val point = Offset(
+                                cropNow.left + localX * cropNow.width,
+                                cropNow.top + localY * cropNow.height
+                            )
+                            debugInfo = "②確定タップ disp=$tapPos boxSize=$boxSize fitRect=$fitRect crop=$cropNow → point(bitmap座標)=$point"
+                            onPointsChanged(currentPoints.value + point)
+                            zoomAnchorBitmap = null
+                        }
+                    }
+                }
+        ) {
+            val fitRect = computeFitRect(measuredSize, bitmapW, bitmapH)
             val crop = zoomAnchorBitmap?.let { computeZoomCrop(it, bitmap) }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(boxHeightDp)
-                    .onSizeChanged { measuredSize = PixelSize(it.width, it.height) }
-                    .pointerInput(Unit) {
-                        detectTapGestures { tapPos ->
-                            val size = currentMeasuredSize.value
-                            val boxSize = IntSize(size.width, size.height)
-                            val scale = currentBaseScale.value
-                            val cropNow = currentCrop.value
-                            if (cropNow == null) {
-                                if (currentPoints.value.size < 4) {
-                                    val anchor = Offset(tapPos.x * scale, tapPos.y * scale)
-                                    debugInfo = "①ズーム開始 disp=$tapPos boxSize=$boxSize scale=$scale → anchor(bitmap)=$anchor"
-                                    zoomAnchorBitmap = anchor
-                                }
-                            } else {
-                                val bitmapPos = cropNow.toBitmapPos(tapPos, boxSize)
-                                val point = Offset(bitmapPos.x / scale, bitmapPos.y / scale)
-                                debugInfo = "②確定タップ disp=$tapPos boxSize=$boxSize crop=$cropNow → bitmapPos=$bitmapPos scale=$scale → point(box単位)=$point"
-                                onPointsChanged(currentPoints.value + point)
-                                zoomAnchorBitmap = null
-                            }
-                        }
+            if (crop == null) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize()
+                )
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    points.forEach { p ->
+                        drawCircle(color = Color.Red, radius = 12f, center = fitRect.contentToDisplay(p, bitmapW, bitmapH))
                     }
-            ) {
-                if (crop == null) {
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize()
+                }
+            } else {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val dstOffset = IntOffset(fitRect.left.roundToInt(), fitRect.top.roundToInt())
+                    val dstSize = IntSize(
+                        fitRect.width.roundToInt().coerceAtLeast(1),
+                        fitRect.height.roundToInt().coerceAtLeast(1)
                     )
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        points.forEach { p -> drawCircle(color = Color.Red, radius = 12f, center = p) }
-                    }
-                } else {
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        val boxSize = IntSize(size.width.roundToInt(), size.height.roundToInt())
-                        drawImage(
-                            image = bitmap.asImageBitmap(),
-                            srcOffset = IntOffset(crop.left.roundToInt(), crop.top.roundToInt()),
-                            srcSize = IntSize(
-                                crop.width.roundToInt().coerceAtLeast(1),
-                                crop.height.roundToInt().coerceAtLeast(1)
-                            ),
-                            dstOffset = IntOffset.Zero,
-                            dstSize = boxSize
-                        )
-                        // 拡大範囲内に確定済みの点があれば参考として表示する。
-                        points.forEach { p ->
-                            val bitmapPos = Offset(p.x * baseScale, p.y * baseScale)
-                            if (bitmapPos.x in crop.left..(crop.left + crop.width) &&
-                                bitmapPos.y in crop.top..(crop.top + crop.height)
-                            ) {
-                                drawCircle(color = Color.Red, radius = 8f, center = crop.toDisplayPos(bitmapPos, boxSize))
-                            }
+                    drawImage(
+                        image = bitmap.asImageBitmap(),
+                        srcOffset = IntOffset(crop.left.roundToInt(), crop.top.roundToInt()),
+                        srcSize = IntSize(
+                            crop.width.roundToInt().coerceAtLeast(1),
+                            crop.height.roundToInt().coerceAtLeast(1)
+                        ),
+                        dstOffset = dstOffset,
+                        dstSize = dstSize
+                    )
+                    // 拡大範囲内に確定済みの点があれば参考として表示する。
+                    points.forEach { p ->
+                        if (p.x in crop.left..(crop.left + crop.width) &&
+                            p.y in crop.top..(crop.top + crop.height)
+                        ) {
+                            val fracX = (p.x - crop.left) / crop.width
+                            val fracY = (p.y - crop.top) / crop.height
+                            val dispPos = Offset(
+                                dstOffset.x + fracX * dstSize.width,
+                                dstOffset.y + fracY * dstSize.height
+                            )
+                            drawCircle(color = Color.Red, radius = 8f, center = dispPos)
                         }
-                        val centerX = boxSize.width / 2f
-                        val centerY = boxSize.height / 2f
-                        drawLine(Color.Yellow, Offset(centerX - 20f, centerY), Offset(centerX + 20f, centerY), strokeWidth = 3f)
-                        drawLine(Color.Yellow, Offset(centerX, centerY - 20f), Offset(centerX, centerY + 20f), strokeWidth = 3f)
                     }
+                    val centerX = dstOffset.x + dstSize.width / 2f
+                    val centerY = dstOffset.y + dstSize.height / 2f
+                    drawLine(Color.Yellow, Offset(centerX - 20f, centerY), Offset(centerX + 20f, centerY), strokeWidth = 3f)
+                    drawLine(Color.Yellow, Offset(centerX, centerY - 20f), Offset(centerX, centerY + 20f), strokeWidth = 3f)
                 }
             }
         }
@@ -440,7 +485,7 @@ private fun TappingStep(
             } else {
                 Button(onClick = onRetake) { Text("撮り直す") }
                 Button(onClick = { onPointsChanged(emptyList()) }, enabled = points.isNotEmpty()) { Text("タップをやり直す") }
-                Button(enabled = points.size == 4, onClick = { onSubmit(measuredSize) }) { Text("送信") }
+                Button(enabled = points.size == 4, onClick = onSubmit) { Text("送信") }
             }
         }
     }
