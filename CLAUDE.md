@@ -2,21 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working in this repository.
 
-## ⚠️ 最優先・セッション開始時に必ず最初に確認：Discord接続トラブル対応（2026-06-21確定）
+## ⚠️ 最優先・セッション開始時、調査ではなくこの手順をそのまま実行すること（2026-06-21確定）
 
-このプロジェクトはユーザーとDiscord経由でも連絡を取り合う運用（`01 企画・管理/handover.md`参照）。**だが毎セッションでDiscordツール（`reply`/`fetch_messages`等、`plugin:discord:discord`提供）が読み込まれない事象が繰り返し発生し、ユーザーの時間を大きく無駄にしている**。本格的な作業の確認を取る前に、必ず最初にToolSearchで`select:reply,fetch_messages`相当を確認し、見つからなければ以下を行うこと。
+このプロジェクトはユーザーとDiscord経由でも連絡を取り合う運用（`01 企画・管理/handover.md`参照）。Discordツール（`reply`/`fetch_messages`等、`plugin:discord:discord`提供）が読み込まれない事象が繰り返し発生し、ユーザーの時間を大きく無駄にした。**原因は確定済み・対処法も確定済み**。次回以降のセッションは原因をもう一度調査し直す必要はない。以下を**毎セッション開始時、本格的な作業に入る前に必ず実行**すること。
 
-1. **設定ファイル自体は疑わなくてよい**：`~/.claude/channels/discord/.env`（トークン）・`~/.claude/channels/discord/access.json`（許可リスト）は2026-06-21時点で正常（トークンはDiscord REST API `GET /users/@me`に200 OKを返す有効なトークン、許可リストにも既存ユーザーIDが登録済み）。ここを毎回読み直して時間を使わない。
-2. **根本原因（2026-06-21、実機検証で確定）**：Discordプラグインのサーバー（`~/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/discord/`）は起動時に毎回`bun install --no-summary && bun server.ts`を実行する設計（`package.json`の`start`スクリプト）。`node_modules`はセッションをまたいで消えることがあり（プラグインの再同期等）、その状態でbunのグローバルキャッシュ（`~/.bun/install/cache`）も冷えている（空に近い）と、依存解決のためのnpmレジストリへの通信に時間がかかり、Claude Code側がMCPサーバーの起動を待つ時間内に接続が完了せず、結果としてDiscordツールが一切ロードされない。**Discord側（トークンの有効性・Gatewayへの到達性・Intents設定）はこの問題と無関係で、すべて正常に動作することを確認済み**（discord.jsの`Client.login()`を単体で直接呼ぶテストでは数秒で`ready`イベントまで到達する）。
-3. **対処手順**：
-   1. Bashで（`dangerouslyDisableSandbox: true`を付けて、プロジェクト外のホームディレクトリ配下のため）以下を一度実行し、bunのグローバルキャッシュを温める：
-      `bun install --no-summary --cwd "/c/Users/<ユーザー>/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/discord"`
-      キャッシュが温まっていれば数秒（実測3秒）で完了する。`ls .../discord/node_modules | wc -l`で100件前後あれば成功。
-   2. その上で**ユーザーにこのターミナルセッションを終了し、新しいセッションを開始してもらう**（`/reload-plugins`では直らない、既知の制約——`feedback_discord_reconnect_needs_new_session`メモ参照）。新セッションでDiscordツールがToolSearchに出るか確認する。
-4. **手順2を実施してもなお繋がらない場合**（bunキャッシュは温かいのに毎回失敗する等）、別原因の可能性がある。その際の注意：
-   - `bun run --cwd <discordプラグインdir> --shell=bun --silent start`をBashから単発実行して様子を見る診断方法は**使えない**——stdinがすぐEOFになり、サーバー側のシャットダウンハンドラ（「Claude Code closes the MCP connection時、stdinがEOFになる」ためのもの）が即座に動いて`discord channel: shutting down`しか出力されない。これは実際の不具合ではなく、単体実行というテスト方法自体の制約。
-   - 代わりに、discord.js単体でログインのみ試す独立スクリプト（`new Client({intents:[...]}).login(TOKEN)`して`ready`イベントを見るだけの数行のNode/Bunスクリプト）で疎通確認すること。これならToken・Intents・Gatewayの健全性を実際に確認できる（2026-06-21はこの方法で「discord側は無罪」と確定した）。
-   - それでも原因不明なら、推測でログ追加等を繰り返さず、ユーザーに状況を伝えて判断を仰ぐ。
+**実行手順（調査不要、そのまま実行）：**
+1. ToolSearchで`select:mcp__plugin_discord_discord__reply`等を確認し、Discordツールが読み込まれているか見る。
+2. **読み込まれているかどうかに関わらず**、毎回必ずBashで次のコマンドを実行する（`dangerouslyDisableSandbox: true`を付ける。プロジェクト外のホームディレクトリ配下のため）：
+   `bun install --no-summary --cwd "/c/Users/<ユーザー>/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/discord"`
+   これはbunのグローバルキャッシュ（`~/.bun/install/cache`）を温めておくための定常メンテナンスで、キャッシュが温かければ数秒（実測3秒）で終わる。**「今繋がっているから不要」ではなく、次に誰かがセッションを再起動した時のために毎回やる**（`node_modules`はセッションをまたいで毎回空に戻る仕様なので、温め直しておかないと次回また同じ問題が起きる）。
+3. 手順1でツールが見つかっていれば、それで完了。ユーザーに繋がっている旨を一報して本来の作業に進む。
+4. 手順1でツールが見つからなければ：手順2を実行済みであることを踏まえ、**ユーザーに「このターミナルセッションを終了して新しいセッションを開始してください」と伝える**（`/reload-plugins`では直らない、既知の制約）。新セッションでまた手順1〜2を実行する。
+
+**この問題の背景（参考情報、対処には不要）**：Discordプラグインのサーバーは起動時に毎回`bun install --no-summary && bun server.ts`を実行する設計（`package.json`の`start`スクリプト）。`node_modules`はセッションをまたいで消えるため、bunのグローバルキャッシュが冷えていると依存解決にnpmレジストリへの通信が必要になり、Claude Code側のMCPサーバー起動待ち時間内に終わらずツールがロードされない。**Discord側（トークン有効性・Gateway到達性・Intents設定）はこの問題と無関係で、無罪と確認済み**（discord.jsの`Client.login()`単体テストで数秒で`ready`に到達する）。
+
+**もし上記手順を実行してもなお繋がらない場合**（ユーザーに再起動してもらってもツールが出ない）、それは2026-06-21に確定した原因とは別の問題。その場合の注意：
+- `bun run --cwd <discordプラグインdir> --shell=bun --silent start`をBashから単発実行して様子を見る診断方法は**使えない**——stdinがすぐEOFになり、サーバー側のシャットダウンハンドラが即座に動いて`discord channel: shutting down`しか出力されない（実際の不具合ではなく、単体実行という方法自体の制約）。
+- 代わりに、discord.js単体でログインのみ試す独立スクリプト（`new Client({intents:[...]}).login(TOKEN)`して`ready`イベントを見るだけの数行のNode/Bunスクリプト）で疎通確認すること。
+- それでも原因不明なら、推測でログ追加等を繰り返さず、ユーザーに状況を伝えて判断を仰ぐ。
 
 ## What this project is
 
