@@ -14,6 +14,7 @@ run_realtime.pyとの差分:
   静かに採用するリスクが前PJより高いため。
 """
 
+from itertools import combinations
 from pathlib import Path
 
 import cv2
@@ -153,7 +154,24 @@ def detect_red_circles(img):
     return circles
 
 
+def _convex_quad_area(pts):
+    """4点の凸包の面積。3点が一直線上等の縮退ケースは自然に小さい面積になる。"""
+    hull = cv2.convexHull(np.array(pts, dtype=np.float32))
+    return cv2.contourArea(hull)
+
+
 def select_board_corners(circles, shape):
+    """検出された赤丸候補から、盤の4隅とみなす4点を選ぶ。
+
+    2026-06-21、方針変更（前PJの「画像4隅それぞれに最も近い赤丸を選ぶ」方式から変更——
+    ユーザー承認済み、このプロジェクト独自に作り直す対象として赤丸検出自体ではなく
+    この角選択ロジックのみが対象）。旧方式は画面の隅近くに背景の赤い物体（小物・ボール等）
+    が入ると、それを盤の角と誤選択する弱点があった。
+
+    新方式：候補点から4点を選ぶ全組み合わせのうち、凸包の面積が最大になる4点を盤の角とする。
+    盤の四隅は候補の中で最も広い範囲に張る4点になるはずなので、画面の隅に偶然写り込んだ
+    背景の赤い物体（盤の内側寄りにあることが多い）は面積で見れば不利になり選ばれにくい。
+    """
     h, w = shape[:2]
     diag = (w ** 2 + h ** 2) ** 0.5
     filt = [c for c in circles if c[3] >= CIRC_MIN]
@@ -165,24 +183,20 @@ def select_board_corners(circles, shape):
     cand = [c for c in filt if c[2] >= rth]
     if len(cand) < 4:
         cand = sorted(filt, key=lambda c: -c[2])[:max(4, len(cand))]
-    corners = [(0, 0), (w, 0), (w, h), (0, h)]
-    sel = []
-    used = set()
-    for icx, icy in corners:
-        best = -1
-        bd = 1e18
-        for i, c in enumerate(cand):
-            if i in used:
-                continue
-            d = (c[0] - icx) ** 2 + (c[1] - icy) ** 2
-            if d < bd:
-                bd = d
-                best = i
-        if best < 0:
-            return None
-        used.add(best)
-        sel.append((cand[best][0], cand[best][1]))
-    return sel
+    if len(cand) < 4:
+        return None
+
+    points = [(c[0], c[1]) for c in cand]
+    best_area = -1.0
+    best_combo = None
+    for combo in combinations(points, 4):
+        area = _convex_quad_area(combo)
+        if area > best_area:
+            best_area = area
+            best_combo = combo
+    if best_combo is None:
+        return None
+    return list(best_combo)
 
 
 def calibrate_from_image(img):

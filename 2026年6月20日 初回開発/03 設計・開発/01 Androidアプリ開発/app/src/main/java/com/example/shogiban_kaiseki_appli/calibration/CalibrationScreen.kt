@@ -328,6 +328,10 @@ private fun TappingStep(
     var measuredSize by remember { mutableStateOf(PixelSize(1, 1)) }
     var zoomAnchorBitmap by remember { mutableStateOf<Offset?>(null) }
     val baseScale = bitmap.width.toFloat() / measuredSize.width.coerceAtLeast(1)
+    // 2026-06-21、過去2回の修正（ドラッグ式→タップズーム式、pointerInput再起動回避）でも
+    // 「確定した点の位置がズレる」症状が再現したため、これ以上推測で直さず、実際の値を
+    // 画面に出して次回実機テストで実測してもらう（CLAUDE.mdの「診断してから直す」方針）。
+    var debugInfo by remember { mutableStateOf("") }
 
     // pointerInputのkey変更による再起動タイミングに依存すると、タップ直後の状態更新が
     // ジェスチャ検出側にまだ反映されておらず「ズームインしたのに2回目のタップが
@@ -351,6 +355,13 @@ private fun TappingStep(
             },
             modifier = Modifier.padding(8.dp)
         )
+        if (debugInfo.isNotEmpty()) {
+            Text(
+                text = debugInfo,
+                modifier = Modifier.padding(horizontal = 8.dp),
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
         BoxWithConstraints(modifier = Modifier.fillMaxWidth().weight(1f)) {
             val boxHeightDp = maxWidth / aspect
             val crop = zoomAnchorBitmap?.let { computeZoomCrop(it, bitmap) }
@@ -367,11 +378,15 @@ private fun TappingStep(
                             val cropNow = currentCrop.value
                             if (cropNow == null) {
                                 if (currentPoints.value.size < 4) {
-                                    zoomAnchorBitmap = Offset(tapPos.x * scale, tapPos.y * scale)
+                                    val anchor = Offset(tapPos.x * scale, tapPos.y * scale)
+                                    debugInfo = "①ズーム開始 disp=$tapPos boxSize=$boxSize scale=$scale → anchor(bitmap)=$anchor"
+                                    zoomAnchorBitmap = anchor
                                 }
                             } else {
                                 val bitmapPos = cropNow.toBitmapPos(tapPos, boxSize)
-                                onPointsChanged(currentPoints.value + Offset(bitmapPos.x / scale, bitmapPos.y / scale))
+                                val point = Offset(bitmapPos.x / scale, bitmapPos.y / scale)
+                                debugInfo = "②確定タップ disp=$tapPos boxSize=$boxSize crop=$cropNow → bitmapPos=$bitmapPos scale=$scale → point(box単位)=$point"
+                                onPointsChanged(currentPoints.value + point)
                                 zoomAnchorBitmap = null
                             }
                         }

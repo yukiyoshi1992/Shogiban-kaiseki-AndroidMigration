@@ -83,16 +83,17 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     同じ写真に対して盤の4隅座標を添えてこのエンドポイントを再度呼ぶ（人間のフォールバック）。
     pointsを指定した場合は常にその4点座標（JSON配列 "[[x1,y1],...,[x4,y4]]"、順不同）を使う。
     """
-    if session.state not in (GameState.IDLE, GameState.READY):
-        raise HTTPException(409, f"calibration not allowed in state={session.state.value}")
-
     img = _decode_image(await file.read())
     if img is None:
         raise HTTPException(400, "failed to decode image")
 
-    # 失敗時も含めて必ず保存する（赤丸検出が失敗するケースほど原因調査に写真が必要なため、
-    # 早期returnの前に保存しておく。2026-06-21、再現待ち写真が保存されていなかった問題への対応）。
+    # 状態チェックより前に必ず保存する（赤丸検出が失敗するケースほど原因調査に写真が必要なため。
+    # 2026-06-21、状態チェックの409エラーが保存より先に発生し写真が一切残らない回帰が発生したため、
+    # 保存を状態チェックより前に移動した）。
     _save_runtime_photo(img, "calib")
+
+    if session.state not in (GameState.IDLE, GameState.READY):
+        raise HTTPException(409, f"calibration not allowed in state={session.state.value}")
 
     if points is None:
         matrix = recognition.calibrate_from_image(img)
@@ -145,14 +146,14 @@ async def post_move(file: UploadFile):
     成功時はKIFに1行追記し、読み上げ用テキストを返す。失敗時はリトライ判断をアプリ側に委ねる
     （アプリ要件: エラー時は自動で1回だけ撮り直し、それでも失敗ならエラー音で諦める）。
     """
-    if session.state != GameState.PLAYING:
-        raise HTTPException(409, f"move not allowed in state={session.state.value}")
-
     img = _decode_image(await file.read())
     if img is None:
         raise HTTPException(400, "failed to decode image")
 
     _save_runtime_photo(img, "move")
+
+    if session.state != GameState.PLAYING:
+        raise HTTPException(409, f"move not allowed in state={session.state.value}")
 
     warped = recognition.warp_board(img, session.calib_matrix)
     recognized = recognition.predict_board(MODEL, warped)
