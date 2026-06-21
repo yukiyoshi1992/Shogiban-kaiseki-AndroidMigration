@@ -172,11 +172,37 @@
 5. ✅ **動作確認**：`uvicorn`をローカル起動し、合成画像（実盤面写真ではない）で`curl`から一連のフロー（`/calibration/photo`→`/calibration/confirm`→`/move`→`/game/end`→`/games`→`/games/{id}`→404確認）を実行、すべて想定通りの応答を確認（`classify_frame`が無関係な画像に対して正しく`"error"`を返すことも確認——閾値の厳格化が機能している）。テストで生成された`runtime/`配下のファイルはテスト後に削除済み（本番フォルダにテストデータを残さない、CLAUDE.mdの教訓通り）。
 6. Discordから新規フィードバック：**カメラのシャッター音がない**（撮れたか分からない）→ Android側カメラ実装の作業時に対応する項目としてCLAUDE.md「今後の検討事項」No.7に記録済み（課題.txtの3課題には直結しないが実運用上のUXフィードバックのため記録）。
 
-### 次回やること
-1. **Androidアプリ側のキャリブレーション・対局画面UI実装**：`/calibration/photo`を呼ぶ→9×9グリッドオーバーレイ表示→人間確認→`/calibration/confirm`→対局画面でシャッター押下ごとに`/move`を呼ぶ→返ってきた`speech_text`をTTSで読み上げ。現在のAndroidアプリは旧`/photo`（通信確認用）しか呼んでいない。
+### 次回やること（このセッション内で着手・下記セッション4続きへ）
+1. ~~Androidアプリ側のキャリブレーション・対局画面UI実装~~ → 本セッション内で実施（下記参照）
 2. （対応中に拾う）カメラのシャッター音追加。
 3. 残課題（KENTO連携・TTS発音の実機検証）は引き続き実装しながら都度対応する方針のまま。
 
+## セッション4続き（同日、Androidアプリ側UI実装）
+
+Discordで「進めていきましょう」との承認を受け、同セッション内でAndroidアプリ側の実装まで継続。
+
+### 実施内容
+1. ✅ `network/ShogiApiModels.kt`・`network/ShogiApiService.kt`を新規作成（サーバの`/calibration/photo`・`/calibration/confirm`・`/move`・`/game/end`に対応するRetrofitインターフェース）。`RetrofitClient`を拡張し`shogiApiService`を追加（旧`photoApiService`はそのまま残す）。
+2. ✅ `board/PieceDisplay.kt`：認識ラベル文字列（`sente_fu`等）を確認画面表示用の漢字表記（`▲歩`等）に変換するヘルパー。サーバ側`recognition.py`のDISPテーブルと同じ対応表。
+3. ✅ `calibration/CalibrationScreen.kt`を新規作成。フロー：①カメラで撮影 → ②撮影写真を画面表示し盤の四隅4点をタップ（タップ座標は表示用に縮小した画像座標から元解像度座標へ変換して送信） → ③`/calibration/photo`へ送信 → ④返ってきた9x9認識結果を漢字表記で表示し人間が確認 → ⑤「OK」で`/calibration/confirm`→対局開始、「やり直す」で①へ戻る（個別マス補正UIはなし、確定済み方針通り）。
+4. ✅ `play/PlayScreen.kt`を新規作成。カメラプレビュー常時表示、シャッター（オンスクリーンボタン or 後述のハードキー）ごとに`/move`を呼ぶ。`status="move"`ならTTSで`speech_text`を読み上げ、`"nochange"`なら無視（駒のずれ等のノイズと判断）、`"error"`なら音声「もう一度撮影してください」→自動で1回だけ撮り直し→それでも失敗なら`ToneGenerator`でエラー音を鳴らして諦める（アプリ要件のリトライ方針通り）。「終局」ボタンで`/game/end`を呼ぶ。
+5. ✅ `MainActivity.kt`を全面改修：
+   - `CalibrationScreen`→`PlayScreen`の画面遷移を管理する小さな`ShogiAppFlow`（ナビゲーションライブラリ不使用、2画面だけなので`sealed class AppScreen`で十分と判断）。
+   - **Bluetoothシャッター対応**：`onKeyDown`で`KEYCODE_VOLUME_UP`をフックし、`PlayScreen`が登録したシャッタートリガーを呼ぶ（アーキテクチャ検討.md4節の方針通り）。
+   - **TTS**：`TextToSpeech`をActivityのライフサイクルで管理（`onCreate`で初期化・日本語設定、`onDestroy`で`shutdown`）。
+   - **WakeLock相当（検討事項No.5を解消）**：対局画面（`Playing`）の間だけ`FLAG_KEEP_SCREEN_ON`を立てる/降ろす。`PowerManager.PARTIAL_WAKE_LOCK`ではなくアーキテクチャ検討.md記載の選択肢のうち簡易な方を採用。
+6. ✅ 旧`camera/CameraScreen.kt`（`/photo`専用の通信確認画面、MainActivityから参照されなくなった）はユーザーの`@old/`規則に従って`camera/@old/CameraScreen.kt`に退避（削除はしていない）。
+
+### 制約・未確認事項
+- **実機・Gradle未確認**：この環境には`kotlinc`/Android Studioがなく、コード上のレビューのみで実機・Gradle Sync確認はできていない。CLAUDE.mdの「IDE作業はユーザーが行う」方針通り、**次回ユーザーにAndroid StudioでGradle Sync→実機(OPPO)実行を依頼する必要がある**。CameraX導入時も最初のビルドでコンパイルエラー2件出た前例があるため、同様に1〜2回の修正ラウンドが発生する可能性を想定しておくこと。
+- キャリブレーション確認画面の9x9表示は、前PJの`save_grid_overlay`（写真にグリッド線を重ねたPNG）ではなく、認識ラベルをテキスト（漢字1文字+▲/△）で9x9表示する簡易版にした。アーキテクチャ検討.mdの「9×9グリッドオーバーレイは確認用表示」という要件は満たすが、写真への重ね合わせ表示ではない点は実装上の簡略化。実機で見づらい場合は次回以降に画像オーバーレイ化を検討。
+
+### 次回やること
+1. **ユーザーに依頼**：Android StudioでGradle Sync→実機(OPPO)へインストール・起動。PCで`uvicorn main:app --host 0.0.0.0 --port 8000`を起動した状態で、キャリブレーション→対局→終局の一連の流れを実際の盤面写真でテスト。
+2. コンパイルエラーが出た場合は内容を共有してもらい、その場で修正。
+3. 実機UATで気になった点（シャッター音がない、等）を拾って都度対応。
+4. 残課題（KENTO連携・TTS発音の実機検証、KIF一覧・共有画面）は引き続き実装しながら都度対応。
+
 ## 中断・再開について
 
-次回セッション開始時は「`CLAUDE.md`と`01 企画・管理/handover.md`を読んで状況を整理して」と伝えれば続きから再開できる。直近の状態は「セッション4」セクションの「次回やること」の項目1（Androidアプリ側のキャリブレーション・対局画面UI実装）から続行する。
+次回セッション開始時は「`CLAUDE.md`と`01 企画・管理/handover.md`を読んで状況を整理して」と伝えれば続きから再開できる。直近の状態は「セッション4続き」セクションの「次回やること」の項目1（ユーザーによるGradle Sync・実機テスト）から続行する。

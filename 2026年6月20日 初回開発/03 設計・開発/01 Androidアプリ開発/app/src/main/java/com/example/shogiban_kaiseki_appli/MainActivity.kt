@@ -3,9 +3,12 @@ package com.example.shogiban_kaiseki_appli
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.speech.tts.TextToSpeech
+import android.view.KeyEvent
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
@@ -16,6 +19,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -24,25 +28,105 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
-import com.example.shogiban_kaiseki_appli.camera.CameraScreen
+import com.example.shogiban_kaiseki_appli.calibration.CalibrationScreen
+import com.example.shogiban_kaiseki_appli.play.PlayScreen
 import com.example.shogiban_kaiseki_appli.ui.theme.ShogibankaisekiappliTheme
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
+    private var tts: TextToSpeech? = null
+    private var shutterTrigger: (() -> Unit)? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        tts = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                tts?.setLanguage(Locale.JAPANESE)
+            }
+        }
         setContent {
             ShogibankaisekiappliTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    CameraPermissionGate(modifier = Modifier.padding(innerPadding))
+                    CameraPermissionGate(modifier = Modifier.padding(innerPadding)) { contentModifier ->
+                        ShogiAppFlow(
+                            modifier = contentModifier,
+                            tts = tts,
+                            registerShutterTrigger = { trigger -> shutterTrigger = trigger },
+                            setKeepScreenOn = { on -> setKeepScreenOn(on) }
+                        )
+                    }
                 }
             }
+        }
+    }
+
+    private fun setKeepScreenOn(on: Boolean) {
+        if (on) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    // Bluetoothシャッター（音量キー押下として届く）を対局中のシャッタートリガーにフックする
+    // （アーキテクチャ検討.md 4節）。
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            val trigger = shutterTrigger
+            if (trigger != null) {
+                trigger.invoke()
+                return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onDestroy() {
+        tts?.shutdown()
+        super.onDestroy()
+    }
+}
+
+private sealed class AppScreen {
+    object Calibration : AppScreen()
+    object Playing : AppScreen()
+}
+
+@Composable
+private fun ShogiAppFlow(
+    modifier: Modifier = Modifier,
+    tts: TextToSpeech?,
+    registerShutterTrigger: (() -> Unit) -> Unit,
+    setKeepScreenOn: (Boolean) -> Unit
+) {
+    var screen by remember { mutableStateOf<AppScreen>(AppScreen.Calibration) }
+
+    when (screen) {
+        is AppScreen.Calibration -> {
+            DisposableEffect(Unit) {
+                setKeepScreenOn(false)
+                onDispose {}
+            }
+            CalibrationScreen(modifier = modifier, onCalibrated = { screen = AppScreen.Playing })
+        }
+        is AppScreen.Playing -> {
+            DisposableEffect(Unit) {
+                setKeepScreenOn(true)
+                onDispose { setKeepScreenOn(false) }
+            }
+            PlayScreen(
+                modifier = modifier,
+                tts = tts,
+                registerShutterTrigger = registerShutterTrigger,
+                onGameEnded = { screen = AppScreen.Calibration }
+            )
         }
     }
 }
 
 @Composable
-fun CameraPermissionGate(modifier: Modifier = Modifier) {
+fun CameraPermissionGate(modifier: Modifier = Modifier, content: @Composable (Modifier) -> Unit) {
     val context = LocalContext.current
     var hasPermission by remember {
         mutableStateOf(
@@ -55,7 +139,7 @@ fun CameraPermissionGate(modifier: Modifier = Modifier) {
     ) { granted -> hasPermission = granted }
 
     if (hasPermission) {
-        CameraScreen(modifier = modifier.fillMaxSize())
+        content(modifier.fillMaxSize())
     } else {
         Box(modifier = modifier.fillMaxSize()) {
             Column(

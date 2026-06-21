@@ -7,7 +7,7 @@ import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
 
 object RetrofitClient {
-    val photoApiService: PhotoApiService by lazy {
+    private val retrofit: Retrofit by lazy {
         val logging = HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BASIC
         }
@@ -23,6 +23,8 @@ object RetrofitClient {
             .client(client)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
-            .create(PhotoApiService::class.java)
     }
+
+    val photoApiService: PhotoApiService by lazy { retrofit.create(PhotoApiService::class.java) }
+    val shogiApiService: ShogiApiService by lazy { retrofit.create(ShogiApiService::class.java) }
 }
