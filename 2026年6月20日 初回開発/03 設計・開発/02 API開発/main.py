@@ -72,35 +72,52 @@ async def receive_photo(file: UploadFile) -> dict[str, str]:
 
 
 @app.post("/calibration/photo")
-async def calibration_photo(file: UploadFile, points: str = Form(...)):
-    """盤の4隅座標（JSON配列 "[[x1,y1],[x2,y2],[x3,y3],[x4,y4]]"、順不同）+ 写真を受け取り、
-    透視変換して9x9を認識する。idle・ready のどちらからでも呼べる（readyからは4隅タップの
-    やり直し＝キャリブレーション再実行を意味する）。
+async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
+    """写真を受け取りキャリブレーションする。idle・ready のどちらからでも呼べる
+    （readyからはキャリブレーションのやり直しを意味する）。
+
+    pointsを省略すると、まず前PJと同じ赤丸4個の自動検出を試す
+    （2026-06-21、「4隅の手動タップが難しすぎる」というユーザー指摘により、
+    手動タップが先ではなく自動検出が先になる二段構成に変更）。
+    自動検出に失敗した場合は status="calibration_failed" を返すので、アプリ側は
+    同じ写真に対して盤の4隅座標を添えてこのエンドポイントを再度呼ぶ（人間のフォールバック）。
+    pointsを指定した場合は常にその4点座標（JSON配列 "[[x1,y1],...,[x4,y4]]"、順不同）を使う。
     """
     if session.state not in (GameState.IDLE, GameState.READY):
         raise HTTPException(409, f"calibration not allowed in state={session.state.value}")
-
-    try:
-        pts = json.loads(points)
-        if len(pts) != 4:
-            raise ValueError
-    except (json.JSONDecodeError, ValueError, TypeError):
-        raise HTTPException(400, "points must be a JSON array of exactly 4 [x, y] pairs")
 
     img = _decode_image(await file.read())
     if img is None:
         raise HTTPException(400, "failed to decode image")
 
-    ordered = recognition.order_points(pts)
-    matrix = recognition.compute_calib(ordered)
+    if points is None:
+        matrix = recognition.calibrate_from_image(img)
+        if matrix is None:
+            return {"status": "calibration_failed", "reason": "red_circles_not_found"}
+    else:
+        try:
+            pts = json.loads(points)
+            if len(pts) != 4:
+                raise ValueError
+        except (json.JSONDecodeError, ValueError, TypeError):
+            raise HTTPException(400, "points must be a JSON array of exactly 4 [x, y] pairs")
+        ordered = recognition.order_points(pts)
+        matrix = recognition.compute_calib(ordered)
+
     warped = recognition.warp_board(img, matrix)
     recognized = recognition.predict_board(MODEL, warped)
+    mismatches = recognition.compare_to_initial(recognized)
 
     _save_runtime_photo(img, "calib")
 
     session.pending_calibration = PendingCalibration(matrix=matrix, recognized=recognized)
     session.state = GameState.READY
-    return {"status": "ready", "recognized": recognized}
+    return {
+        "status": "ready",
+        "recognized": recognized,
+        "matches_initial": len(mismatches) == 0,
+        "mismatch_count": len(mismatches),
+    }
 
 
 @app.post("/calibration/confirm")

@@ -69,10 +69,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Bluetoothシャッター（音量キー押下として届く）を対局中のシャッタートリガーにフックする
-    // （アーキテクチャ検討.md 4節）。
+    // Bluetoothシャッター（音量キー押下として届く）をシャッタートリガーにフックする
+    // （アーキテクチャ検討.md 4節）。キャリブレーション撮影・対局中の両方で使えるよう
+    // 音量アップ・ダウンの両方を対象にする（2026-06-21、ユーザー要望）。
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
             val trigger = shutterTrigger
             if (trigger != null) {
                 trigger.invoke()
@@ -108,7 +109,11 @@ private fun ShogiAppFlow(
                 setKeepScreenOn(false)
                 onDispose {}
             }
-            CalibrationScreen(modifier = modifier, onCalibrated = { screen = AppScreen.Playing })
+            CalibrationScreen(
+                modifier = modifier,
+                registerShutterTrigger = registerShutterTrigger,
+                onCalibrated = { screen = AppScreen.Playing }
+            )
         }
         is AppScreen.Playing -> {
             DisposableEffect(Unit) {

@@ -12,7 +12,7 @@ interface ShogiApiService {
     @POST("calibration/photo")
     suspend fun calibrationPhoto(
         @Part file: MultipartBody.Part,
-        @Part("points") points: RequestBody
+        @Part("points") points: RequestBody? = null
     ): Response<CalibrationPhotoResponse>
 
     @POST("calibration/confirm")

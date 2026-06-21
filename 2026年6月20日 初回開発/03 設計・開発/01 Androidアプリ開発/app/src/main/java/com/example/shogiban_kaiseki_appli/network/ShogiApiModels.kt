@@ -1,9 +1,17 @@
 package com.example.shogiban_kaiseki_appli.network
 
-/** サーバの /calibration/photo レスポンス。recognizedは9x9のラベル文字列グリッド（行=row,列=col）。 */
+/**
+ * サーバの /calibration/photo レスポンス。recognizedは9x9のラベル文字列グリッド（行=row,列=col）。
+ * matches_initialは認識結果が将棋の初期配置と一致するかどうかをサーバ側で自動判定した結果
+ * （2026-06-21、実機テストでのユーザー指摘により人間の目視確認UIから自動判定に変更）。
+ * 個別マス補正はしない方針のため、不一致の詳細は件数のみ（mismatch_count）で十分。
+ */
 data class CalibrationPhotoResponse(
     val status: String? = null,
-    val recognized: List<List<String>>? = null
+    val recognized: List<List<String>>? = null,
+    val matches_initial: Boolean? = null,
+    val mismatch_count: Int? = null,
+    val reason: String? = null
 )
 
 data class CalibrationConfirmResponse(

@@ -118,6 +118,86 @@ def save_grid_overlay(img, M, out_path, grid_size=GRID_SIZE, cell_px=CELL_PX):
     cv2.imencode(".png", vis)[1].tofile(str(out_path))
 
 
+# ===== 赤丸キャリブレーション（自動検出。前PJ run_realtime.py から移植） =====
+# 2026-06-21、実機テストで「4隅の手動タップが難しすぎる」というユーザー指摘を受け、
+# 「まず赤丸で自動キャリブレーション、検出できなければ人間が4隅タップ」という前PJと同じ
+# 二段構成に変更。物理的な盤に前PJ運用時と同じ赤丸マーカーがある前提。
+RED_LOWER1 = np.array([0, 120, 80])
+RED_UPPER1 = np.array([10, 255, 255])
+RED_LOWER2 = np.array([165, 120, 80])
+RED_UPPER2 = np.array([180, 255, 255])
+CIRC_MIN = 0.55
+BOARD_RADIUS_RATIO = 0.006
+
+
+def detect_red_circles(img):
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    mask = cv2.bitwise_or(cv2.inRange(hsv, RED_LOWER1, RED_UPPER1),
+                           cv2.inRange(hsv, RED_LOWER2, RED_UPPER2))
+    k = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    circles = []
+    for c in cnts:
+        a = cv2.contourArea(c)
+        if a < 200:
+            continue
+        peri = cv2.arcLength(c, True)
+        if peri == 0:
+            continue
+        circ = 4 * np.pi * a / (peri * peri)
+        (x, y), r = cv2.minEnclosingCircle(c)
+        if 8 <= r <= 80:
+            circles.append((float(x), float(y), float(r), float(circ)))
+    return circles
+
+
+def select_board_corners(circles, shape):
+    h, w = shape[:2]
+    diag = (w ** 2 + h ** 2) ** 0.5
+    filt = [c for c in circles if c[3] >= CIRC_MIN]
+    if len(filt) < 4:
+        filt = [c for c in circles if c[3] >= 0.45]
+    if len(filt) < 4:
+        return None
+    rth = diag * BOARD_RADIUS_RATIO
+    cand = [c for c in filt if c[2] >= rth]
+    if len(cand) < 4:
+        cand = sorted(filt, key=lambda c: -c[2])[:max(4, len(cand))]
+    corners = [(0, 0), (w, 0), (w, h), (0, h)]
+    sel = []
+    used = set()
+    for icx, icy in corners:
+        best = -1
+        bd = 1e18
+        for i, c in enumerate(cand):
+            if i in used:
+                continue
+            d = (c[0] - icx) ** 2 + (c[1] - icy) ** 2
+            if d < bd:
+                bd = d
+                best = i
+        if best < 0:
+            return None
+        used.add(best)
+        sel.append((cand[best][0], cand[best][1]))
+    return sel
+
+
+def calibrate_from_image(img):
+    """画像から赤丸4個を自動検出してキャリブレーション行列を計算する。
+    検出できなければNoneを返す（呼び出し側は人間の4隅タップにフォールバックする）。
+    """
+    circles = detect_red_circles(img)
+    if len(circles) < 4:
+        return None
+    corners = select_board_corners(circles, img.shape)
+    if corners is None:
+        return None
+    return compute_calib(order_points(corners))
+
+
 # ===== 座標・差分・指し手判定 =====
 def square_to_rc(sq):
     col = 8 - (sq // 9)
@@ -139,6 +219,27 @@ def board_to_label_grid(board):
         color_prefix = "sente" if piece.color == shogi.BLACK else "gote"
         grid[row][col] = f"{color_prefix}_{piece_name}"
     return grid
+
+
+def compare_to_initial(recognized):
+    """recognizedを将棋の初期配置と比較する。
+
+    キャリブレーションは常に対局開始前の初期配置に対して行うため、認識結果が初期配置と
+    一致するかどうかは人間が9x9を目視確認しなくてもプログラム側で判定できる
+    （2026-06-21、実機テストでのユーザー指摘により、キャリブレーション確認UIを
+    「人間が見て判断」から「プログラムが自動判定」に変更）。前PJ run_realtime.py の
+    INITIAL_BOARD_STD直書きではなく、shogi.Board()の初期状態をboard_to_label_gridに
+    通して使う（指し手判定ロジックの初期状態と単一の真実を共有するため）。
+
+    Returns: [(row, col, expected, got), ...]  空リストなら完全一致。
+    """
+    expected_grid = board_to_label_grid(shogi.Board())
+    mismatches = []
+    for r in range(9):
+        for c in range(9):
+            if recognized[r][c] != expected_grid[r][c]:
+                mismatches.append((r, c, expected_grid[r][c], recognized[r][c]))
+    return mismatches
 
 
 def diff_count(grid_a, grid_b):
