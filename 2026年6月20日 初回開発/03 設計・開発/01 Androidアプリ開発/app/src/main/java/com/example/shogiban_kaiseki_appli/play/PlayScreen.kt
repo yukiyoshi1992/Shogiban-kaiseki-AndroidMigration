@@ -8,6 +8,8 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
@@ -146,10 +148,19 @@ fun PlayScreen(
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
                 cameraProviderFuture.addListener({
                     val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.setSurfaceProvider(previewView.surfaceProvider)
-                    }
-                    val capture = ImageCapture.Builder().build()
+                    // 前PJのカメラ仕様（16:9、3840x2160）に合わせる。CalibrationScreenと同じ理由
+                    // （2026-06-21）。
+                    val resolutionSelector = ResolutionSelector.Builder()
+                        .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                        .build()
+                    val preview = Preview.Builder()
+                        .setResolutionSelector(resolutionSelector)
+                        .build().also {
+                            it.setSurfaceProvider(previewView.surfaceProvider)
+                        }
+                    val capture = ImageCapture.Builder()
+                        .setResolutionSelector(resolutionSelector)
+                        .build()
                     imageCapture = capture
                     cameraProvider.unbindAll()
                     cameraProvider.bindToLifecycle(

@@ -3,10 +3,13 @@ package com.example.shogiban_kaiseki_appli.calibration
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
@@ -244,10 +247,20 @@ private fun CameraCaptureStep(
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
                 cameraProviderFuture.addListener({
                     val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.setSurfaceProvider(previewView.surfaceProvider)
-                    }
-                    val capture = ImageCapture.Builder().build()
+                    // CameraXの既定は4:3で、前PJのカメラ仕様（16:9、3840x2160）と画角が異なり、
+                    // 盤の周囲の余白が増えて赤丸検出が不安定になっていた。前PJと同じ16:9を明示指定する
+                    // （2026-06-21）。
+                    val resolutionSelector = ResolutionSelector.Builder()
+                        .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                        .build()
+                    val preview = Preview.Builder()
+                        .setResolutionSelector(resolutionSelector)
+                        .build().also {
+                            it.setSurfaceProvider(previewView.surfaceProvider)
+                        }
+                    val capture = ImageCapture.Builder()
+                        .setResolutionSelector(resolutionSelector)
+                        .build()
                     onImageCaptureReady(capture)
                     cameraProvider.unbindAll()
                     cameraProvider.bindToLifecycle(
@@ -272,12 +285,61 @@ private fun CameraCaptureStep(
     }
 }
 
+/** 拡大鏡（ルーペ）の表示位置・参照範囲。指が今どこを指しているかに応じて毎フレーム再計算する。 */
+private data class MagnifierGeom(
+    val dstLeft: Float,
+    val dstTop: Float,
+    val sizePx: Float,
+    val srcX: Int,
+    val srcY: Int,
+    val cropBitmapPx: Int,
+    val scaleToBitmap: Float
+)
+
+private fun computeMagnifierGeom(
+    anchor: Offset,
+    canvasSize: IntSize,
+    bitmap: Bitmap,
+    measuredWidth: Int,
+    density: androidx.compose.ui.unit.Density
+): MagnifierGeom = with(density) {
+    val scaleToBitmap = bitmap.width.toFloat() / measuredWidth.coerceAtLeast(1)
+    val magnifierSizePx = 160.dp.toPx()
+    val cropBoxPx = 36.dp.toPx()
+    val cropBitmapPx = (cropBoxPx * 2 * scaleToBitmap).roundToInt().coerceAtLeast(1)
+    val centerBitmapX = anchor.x * scaleToBitmap
+    val centerBitmapY = anchor.y * scaleToBitmap
+    val srcX = (centerBitmapX - cropBitmapPx / 2f).roundToInt()
+        .coerceIn(0, (bitmap.width - cropBitmapPx).coerceAtLeast(0))
+    val srcY = (centerBitmapY - cropBitmapPx / 2f).roundToInt()
+        .coerceIn(0, (bitmap.height - cropBitmapPx).coerceAtLeast(0))
+    val gapPx = 24.dp.toPx()
+    var dstLeft = anchor.x - magnifierSizePx / 2f
+    var dstTop = anchor.y - magnifierSizePx - gapPx
+    if (dstTop < 0f) dstTop = anchor.y + gapPx
+    dstLeft = dstLeft.coerceIn(0f, (canvasSize.width - magnifierSizePx).coerceAtLeast(0f))
+    dstTop = dstTop.coerceIn(0f, (canvasSize.height - magnifierSizePx).coerceAtLeast(0f))
+    MagnifierGeom(dstLeft, dstTop, magnifierSizePx, srcX, srcY, cropBitmapPx, scaleToBitmap)
+}
+
+/** posが拡大鏡の表示矩形内にあれば、拡大元（実画像）の対応位置に逆変換して返す。範囲外ならnull。 */
+private fun MagnifierGeom.mapIfInside(pos: Offset): Offset? {
+    if (pos.x < dstLeft || pos.x > dstLeft + sizePx || pos.y < dstTop || pos.y > dstTop + sizePx) return null
+    val fracX = (pos.x - dstLeft) / sizePx
+    val fracY = (pos.y - dstTop) / sizePx
+    val bitmapX = srcX + fracX * cropBitmapPx
+    val bitmapY = srcY + fracY * cropBitmapPx
+    return Offset(bitmapX / scaleToBitmap, bitmapY / scaleToBitmap)
+}
+
 /**
  * 盤の四隅タップ用ステップ。タップ＝指を置いた瞬間にその位置へ点を置き、指を離すまでドラッグで
  * 微調整できる。ドラッグ中は指の周辺を拡大した「ルーペ」を表示し、細かい位置決めをしやすくする
  * （2026-06-21、「タップの難易度が高すぎる」というユーザー指摘への対応）。
  * 既存の点の近く（hitRadius以内）でドラッグを始めればその点を再調整、それ以外の場所なら
  * 新しい点を追加する（4点に達したら無視）。
+ * ルーペの表示範囲そのものに指を移動してドラッグすると、拡大された範囲内での微調整として扱う
+ * （ルーペは見るだけで触れても反応しない、という分かりにくさへの対応、2026-06-21）。
  */
 @Composable
 private fun TappingStep(
@@ -292,7 +354,7 @@ private fun TappingStep(
     val density = LocalDensity.current
     val aspect = bitmap.width.toFloat() / bitmap.height.toFloat()
     var measuredSize by remember { mutableStateOf(PixelSize(1, 1)) }
-    var magnifierPosition by remember { mutableStateOf<Offset?>(null) }
+    var magnifierGeom by remember { mutableStateOf<MagnifierGeom?>(null) }
     val hitRadiusPx = with(density) { 28.dp.toPx() }
 
     Column(modifier = modifier.fillMaxSize()) {
@@ -300,7 +362,7 @@ private fun TappingStep(
             Text(text = hint, modifier = Modifier.padding(8.dp))
         }
         Text(
-            text = "盤の四隅（マス目の角、駒台は不要）を押さえてドラッグで微調整してください（${points.size}/4）",
+            text = "盤の四隅（マス目の角、駒台は不要）を押さえてください。表示される拡大鏡の中をそのまま指でなぞって微調整し、ちょうどよい位置で指を離してください（${points.size}/4）",
             modifier = Modifier.padding(8.dp)
         )
         BoxWithConstraints(modifier = Modifier.fillMaxWidth().weight(1f)) {
@@ -329,23 +391,30 @@ private fun TappingStep(
                             }
                             if (targetIndex == null) return@awaitEachGesture
 
+                            val canvasSize = IntSize(measuredSize.width, measuredSize.height)
+                            var pointPos = startPos
                             var current = points.toMutableList()
-                            if (targetIndex == current.size) current.add(startPos) else current[targetIndex] = startPos
+                            if (targetIndex == current.size) current.add(pointPos) else current[targetIndex] = pointPos
                             onPointsChanged(current.toList())
-                            magnifierPosition = startPos
+                            var geom = computeMagnifierGeom(pointPos, canvasSize, bitmap, measuredSize.width, density)
+                            magnifierGeom = geom
                             down.consume()
 
                             while (true) {
                                 val event = awaitPointerEvent()
                                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                                 if (change.changedToUp()) {
-                                    magnifierPosition = null
+                                    magnifierGeom = null
                                     break
                                 }
+                                // ルーペの表示範囲内をなぞった場合は拡大された範囲内での移動として解釈し、
+                                // それ以外は実画像上の通常のドラッグとして扱う。
+                                pointPos = geom.mapIfInside(change.position) ?: change.position
                                 current = current.toMutableList()
-                                current[targetIndex] = change.position
+                                current[targetIndex] = pointPos
                                 onPointsChanged(current.toList())
-                                magnifierPosition = change.position
+                                geom = computeMagnifierGeom(pointPos, canvasSize, bitmap, measuredSize.width, density)
+                                magnifierGeom = geom
                                 change.consume()
                             }
                         }
@@ -359,42 +428,23 @@ private fun TappingStep(
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     points.forEach { p -> drawCircle(color = Color.Red, radius = 12f, center = p) }
 
-                    val magPos = magnifierPosition
-                    if (magPos != null && measuredSize.width > 0) {
-                        val scaleToBitmap = bitmap.width.toFloat() / measuredSize.width
-                        val magnifierSizePx = 160.dp.toPx()
-                        val cropBoxPx = 36.dp.toPx()
-                        val cropBitmapPx = (cropBoxPx * 2 * scaleToBitmap).roundToInt().coerceAtLeast(1)
-
-                        val centerBitmapX = magPos.x * scaleToBitmap
-                        val centerBitmapY = magPos.y * scaleToBitmap
-                        val srcX = (centerBitmapX - cropBitmapPx / 2f).roundToInt()
-                            .coerceIn(0, (bitmap.width - cropBitmapPx).coerceAtLeast(0))
-                        val srcY = (centerBitmapY - cropBitmapPx / 2f).roundToInt()
-                            .coerceIn(0, (bitmap.height - cropBitmapPx).coerceAtLeast(0))
-
-                        val gapPx = 24.dp.toPx()
-                        var dstLeft = magPos.x - magnifierSizePx / 2f
-                        var dstTop = magPos.y - magnifierSizePx - gapPx
-                        if (dstTop < 0f) dstTop = magPos.y + gapPx
-                        dstLeft = dstLeft.coerceIn(0f, (size.width - magnifierSizePx).coerceAtLeast(0f))
-                        dstTop = dstTop.coerceIn(0f, (size.height - magnifierSizePx).coerceAtLeast(0f))
-
+                    val geom = magnifierGeom
+                    if (geom != null) {
                         drawImage(
                             image = bitmap.asImageBitmap(),
-                            srcOffset = IntOffset(srcX, srcY),
-                            srcSize = IntSize(cropBitmapPx, cropBitmapPx),
-                            dstOffset = IntOffset(dstLeft.roundToInt(), dstTop.roundToInt()),
-                            dstSize = IntSize(magnifierSizePx.roundToInt(), magnifierSizePx.roundToInt())
+                            srcOffset = IntOffset(geom.srcX, geom.srcY),
+                            srcSize = IntSize(geom.cropBitmapPx, geom.cropBitmapPx),
+                            dstOffset = IntOffset(geom.dstLeft.roundToInt(), geom.dstTop.roundToInt()),
+                            dstSize = IntSize(geom.sizePx.roundToInt(), geom.sizePx.roundToInt())
                         )
                         drawRect(
                             color = Color.White,
-                            topLeft = Offset(dstLeft, dstTop),
-                            size = androidx.compose.ui.geometry.Size(magnifierSizePx, magnifierSizePx),
+                            topLeft = Offset(geom.dstLeft, geom.dstTop),
+                            size = androidx.compose.ui.geometry.Size(geom.sizePx, geom.sizePx),
                             style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f)
                         )
-                        val centerX = dstLeft + magnifierSizePx / 2f
-                        val centerY = dstTop + magnifierSizePx / 2f
+                        val centerX = geom.dstLeft + geom.sizePx / 2f
+                        val centerY = geom.dstTop + geom.sizePx / 2f
                         drawLine(Color.Red, Offset(centerX - 14f, centerY), Offset(centerX + 14f, centerY), strokeWidth = 3f)
                         drawLine(Color.Red, Offset(centerX, centerY - 14f), Offset(centerX, centerY + 14f), strokeWidth = 3f)
                     }
