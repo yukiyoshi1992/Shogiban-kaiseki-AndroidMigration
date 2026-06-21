@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.view.KeyEvent
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -80,6 +81,13 @@ class MainActivity : ComponentActivity() {
             (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP || event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
         ) {
             val trigger = shutterTrigger
+            // 音量キーが反応しないという報告の原因調査用。イベント自体が届いているか、
+            // シャッターが登録済みかをトーストで可視化する（2026-06-21、原因切り分け用の一時的な診断）。
+            Toast.makeText(
+                this,
+                if (trigger != null) "音量キー検知→シャッター実行" else "音量キー検知したがシャッター未登録",
+                Toast.LENGTH_SHORT
+            ).show()
             if (trigger != null) {
                 trigger.invoke()
                 return true
