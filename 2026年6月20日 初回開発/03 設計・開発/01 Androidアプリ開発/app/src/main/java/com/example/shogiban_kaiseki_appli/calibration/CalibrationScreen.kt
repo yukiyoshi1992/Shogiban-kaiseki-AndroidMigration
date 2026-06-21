@@ -209,9 +209,16 @@ private fun CameraCaptureStep(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val playShutterSound = rememberShutterSound()
+    // imageCaptureは（PlayScreenのbyremember状態と違い）普通の関数パラメータなので、
+    // capture()がそのまま参照すると「LaunchedEffect(Unit)が初回実行された時点のnull」を
+    // 永遠に捉えたままになる（カメラ初期化完了後の再コンポーズで新しいimageCaptureが渡されても、
+    // 音量キー側に登録済みのcapture()はそれを見ない）。これが「画面のボタンは効くが音量キーは
+    // 何も起きない」バグの真因だった（2026-06-21、実機報告で確定）。rememberUpdatedStateで
+    // 常に最新の値を読むようにする。
+    val currentImageCapture = rememberUpdatedState(imageCapture)
 
     fun capture() {
-        val capture = imageCapture ?: return
+        val capture = currentImageCapture.value ?: return
         playShutterSound()
         val file = createTempPhotoFile(context, "calib")
         val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
