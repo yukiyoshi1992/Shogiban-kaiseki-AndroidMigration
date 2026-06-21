@@ -17,8 +17,10 @@ object RetrofitClient {
             // 分けて計測し、NetworkTiming.lastSummaryに記録する（詳細はNetworkTiming.kt参照）。
             .eventListener(TimingEventListener())
             .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .writeTimeout(60, TimeUnit.SECONDS)
+            // 2026-06-21夜、診断用に60秒→5分へ一時延長（盤面写真だけ60秒でタイムアウトする件の
+            // 「単にアップロードが遅いだけ」説を実験で確かめるため）。原因確定後、適切な値に戻すこと。
+            .readTimeout(300, TimeUnit.SECONDS)
+            .writeTimeout(300, TimeUnit.SECONDS)
             .build()
 
         Retrofit.Builder()
