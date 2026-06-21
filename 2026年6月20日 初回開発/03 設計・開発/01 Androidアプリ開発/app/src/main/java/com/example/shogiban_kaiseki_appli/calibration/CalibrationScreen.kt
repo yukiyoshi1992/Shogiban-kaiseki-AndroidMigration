@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.shogiban_kaiseki_appli.board.labelToDisplay
+import com.example.shogiban_kaiseki_appli.camera.rememberShutterSound
 import com.example.shogiban_kaiseki_appli.network.RetrofitClient
 import com.google.gson.Gson
 import kotlinx.coroutines.launch
@@ -161,6 +162,7 @@ private fun CameraCaptureStep(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val playShutterSound = rememberShutterSound()
 
     Box(modifier = modifier.fillMaxSize()) {
         AndroidView(
@@ -194,6 +196,7 @@ private fun CameraCaptureStep(
                 shape = CircleShape,
                 onClick = {
                     val capture = imageCapture ?: return@Button
+                    playShutterSound()
                     val file = createTempPhotoFile(context, "calib")
                     val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
                     capture.takePicture(

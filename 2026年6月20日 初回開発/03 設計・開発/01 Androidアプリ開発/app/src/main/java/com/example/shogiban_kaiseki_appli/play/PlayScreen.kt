@@ -37,6 +37,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.example.shogiban_kaiseki_appli.camera.rememberShutterSound
 import com.example.shogiban_kaiseki_appli.network.RetrofitClient
 import kotlinx.coroutines.launch
 import okhttp3.MediaType.Companion.toMediaType
@@ -73,6 +74,7 @@ fun PlayScreen(
     var isBusy by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf("対局中。シャッターを押すと1手撮影します。") }
     var moveCount by remember { mutableStateOf(0) }
+    val playShutterSound = rememberShutterSound()
 
     fun captureOnce(onDone: (MoveResult) -> Unit) {
         val capture = imageCapture
@@ -80,6 +82,7 @@ fun PlayScreen(
             onDone(MoveResult.Error("カメラ未準備"))
             return
         }
+        playShutterSound()
         val file = createTempPhotoFile(context, "move")
         val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
         capture.takePicture(
