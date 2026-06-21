@@ -90,6 +90,10 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     if img is None:
         raise HTTPException(400, "failed to decode image")
 
+    # 失敗時も含めて必ず保存する（赤丸検出が失敗するケースほど原因調査に写真が必要なため、
+    # 早期returnの前に保存しておく。2026-06-21、再現待ち写真が保存されていなかった問題への対応）。
+    _save_runtime_photo(img, "calib")
+
     if points is None:
         matrix = recognition.calibrate_from_image(img)
         if matrix is None:
@@ -107,8 +111,6 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     warped = recognition.warp_board(img, matrix)
     recognized = recognition.predict_board(MODEL, warped)
     mismatches = recognition.compare_to_initial(recognized)
-
-    _save_runtime_photo(img, "calib")
 
     session.pending_calibration = PendingCalibration(matrix=matrix, recognized=recognized)
     session.state = GameState.READY
