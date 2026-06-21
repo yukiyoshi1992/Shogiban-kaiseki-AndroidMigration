@@ -1,4 +1,5 @@
 received_photos/
+runtime/
 __pycache__/
 *.pyc
 .venv/

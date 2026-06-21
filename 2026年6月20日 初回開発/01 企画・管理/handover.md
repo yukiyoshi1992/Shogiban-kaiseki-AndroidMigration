@@ -150,6 +150,33 @@
 - 今回ハマった/解決したポイント：①`Preview.setSurfaceProvider`はKotlinプロパティ構文不可→メソッド呼び出しに修正 ②cleartext HTTP通信のブロック→`usesCleartextTraffic="true"`追加 ③Windowsの「パブリックネットワーク」判定によるファイアウォールブロック→「プライベートネットワーク」に切替で解決（すべてCLAUDE.mdに教訓記録済み）
 - 本セッションでDiscord返信ツールの呼び忘れが複数回発生し、ユーザーに迷惑をかけた。再発防止策（CLAUDE.mdへの明記＋`.claude/settings.json`のStop hookリマインダー）を実施済み
 
+## セッション4（2026-06-21、前PJ認識ロジックのサーバ統合）
+
+「前回からの引継ぎ対応をお願いします」の依頼で再開。セッション3の次回項目5（サーバ`/photo`への認識ロジック統合）に着手。
+
+### 提示し合意したプロセス（6ステップ、ユーザー承認済み）
+1. 前PJコード（`run_realtime.py`）の必要部分をモデルファイルとともに複製
+2. サーバ側セッション状態機械の実装
+3. キャリブレーションAPI（`/calibration/photo`・`/calibration/confirm`）
+4. 対局進行API（`/move`）
+5. 終局・一覧API（`/game/end`・`/games`・`/games/{id}`）
+6. 本番写真保存先のruntime/相当への整理
+
+### 実施内容
+1. ✅ `03 設計・開発/02 API開発/recognition.py`を新規作成。前PJ`run_realtime.py`から`load_model`/`predict_board`/`order_points`/`compute_calib`/`classify_frame`/`save_kif`等を移植。**`classify_frame`の採用判定をアーキテクチャ検討.md記載の修正版に変更**（diffが完全に0の候補のみ採用、曖昧なら`depth2`へ、最終的にダメなら`"error"`——前PJの`MOVE_DIFF_THRESHOLD<=2`という緩い許容を廃止）。青三角向き判定・赤丸自動検出・手動キャリブレーションUIは移植不要（ネイティブカメラで向き固定・4隅は人間が直接タップするため）と判断し、移植しなかった。
+   - モデルファイル（`best_model.pth`・`model_meta.json`）も前PJから`02 API開発/models/`へ複製済み。
+   - `requirements.txt`に`torch`/`torchvision`/`opencv-python`/`numpy`/`pillow`/`python-shogi`を追加。
+2. ✅ `session.py`を新規作成。`GameState`（`idle→ready→playing→finishing→idle`）と対局状態（`Board`・キャリブレーション行列・KIFパス等）を保持するプロセス内シングルトン。**設計判断**：アーキテクチャ検討.md記載の"calibrating"状態は、サーバが実際にリクエストを受け取るのは常に「写真＋4点タップが揃った後」なので、サーバ側の状態としては明示的に持たず`idle→ready`の1ステップで表現することにした（`session.py`のdocstringに記録）。
+3. ✅ `main.py`を全面書き直し。`/calibration/photo`（4隅座標+写真→9x9認識結果）・`/calibration/confirm`（確定→対局開始）・`/move`（指し手判定→KIF追記+読み上げテキスト）・`/game/end`（終局→idleへ）・`GET /games`（日付絞り込み）・`GET /games/{id}`を実装。旧`/health`・`/photo`（通信確認用ダミー、Androidアプリが現在使っているのはこちら）はそのまま残した——Android側を新エンドポイントに繋ぎ直すのは次回以降のタスク。
+4. ✅ 保存先整理：新エンドポイントの写真は`runtime/photos/`、KIFは`runtime/games/`に保存（`.gitignore`に`runtime/`追加）。旧`received_photos/`とは分離。
+5. ✅ **動作確認**：`uvicorn`をローカル起動し、合成画像（実盤面写真ではない）で`curl`から一連のフロー（`/calibration/photo`→`/calibration/confirm`→`/move`→`/game/end`→`/games`→`/games/{id}`→404確認）を実行、すべて想定通りの応答を確認（`classify_frame`が無関係な画像に対して正しく`"error"`を返すことも確認——閾値の厳格化が機能している）。テストで生成された`runtime/`配下のファイルはテスト後に削除済み（本番フォルダにテストデータを残さない、CLAUDE.mdの教訓通り）。
+6. Discordから新規フィードバック：**カメラのシャッター音がない**（撮れたか分からない）→ Android側カメラ実装の作業時に対応する項目としてCLAUDE.md「今後の検討事項」No.7に記録済み（課題.txtの3課題には直結しないが実運用上のUXフィードバックのため記録）。
+
+### 次回やること
+1. **Androidアプリ側のキャリブレーション・対局画面UI実装**：`/calibration/photo`を呼ぶ→9×9グリッドオーバーレイ表示→人間確認→`/calibration/confirm`→対局画面でシャッター押下ごとに`/move`を呼ぶ→返ってきた`speech_text`をTTSで読み上げ。現在のAndroidアプリは旧`/photo`（通信確認用）しか呼んでいない。
+2. （対応中に拾う）カメラのシャッター音追加。
+3. 残課題（KENTO連携・TTS発音の実機検証）は引き続き実装しながら都度対応する方針のまま。
+
 ## 中断・再開について
 
-次回セッション開始時は「`CLAUDE.md`と`01 企画・管理/handover.md`を読んで状況を整理して」と伝えれば続きから再開できる。直近の状態は「セッション3」セクションの「次回/ユーザーに依頼すること」の項目5（前PJ認識ロジックのサーバ統合）から続行する。
+次回セッション開始時は「`CLAUDE.md`と`01 企画・管理/handover.md`を読んで状況を整理して」と伝えれば続きから再開できる。直近の状態は「セッション4」セクションの「次回やること」の項目1（Androidアプリ側のキャリブレーション・対局画面UI実装）から続行する。
