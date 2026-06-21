@@ -35,6 +35,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -328,6 +329,16 @@ private fun TappingStep(
     var zoomAnchorBitmap by remember { mutableStateOf<Offset?>(null) }
     val baseScale = bitmap.width.toFloat() / measuredSize.width.coerceAtLeast(1)
 
+    // pointerInputのkey変更による再起動タイミングに依存すると、タップ直後の状態更新が
+    // ジェスチャ検出側にまだ反映されておらず「ズームインしたのに2回目のタップが
+    // ズームアウト時の座標として解釈される」不具合が起きていた。rememberUpdatedStateで
+    // 常に最新の値を読むようにし、pointerInput自体はUnitキーで一度だけ起動して
+    // 再起動タイミングの問題を構造的に回避する（2026-06-21）。
+    val currentCrop = rememberUpdatedState(zoomAnchorBitmap?.let { computeZoomCrop(it, bitmap) })
+    val currentPoints = rememberUpdatedState(points)
+    val currentBaseScale = rememberUpdatedState(baseScale)
+    val currentMeasuredSize = rememberUpdatedState(measuredSize)
+
     Column(modifier = modifier.fillMaxSize()) {
         if (hint.isNotEmpty()) {
             Text(text = hint, modifier = Modifier.padding(8.dp))
@@ -348,16 +359,19 @@ private fun TappingStep(
                     .fillMaxWidth()
                     .height(boxHeightDp)
                     .onSizeChanged { measuredSize = PixelSize(it.width, it.height) }
-                    .pointerInput(crop, points, measuredSize) {
+                    .pointerInput(Unit) {
                         detectTapGestures { tapPos ->
-                            val boxSize = IntSize(measuredSize.width, measuredSize.height)
-                            if (crop == null) {
-                                if (points.size < 4) {
-                                    zoomAnchorBitmap = Offset(tapPos.x * baseScale, tapPos.y * baseScale)
+                            val size = currentMeasuredSize.value
+                            val boxSize = IntSize(size.width, size.height)
+                            val scale = currentBaseScale.value
+                            val cropNow = currentCrop.value
+                            if (cropNow == null) {
+                                if (currentPoints.value.size < 4) {
+                                    zoomAnchorBitmap = Offset(tapPos.x * scale, tapPos.y * scale)
                                 }
                             } else {
-                                val bitmapPos = crop.toBitmapPos(tapPos, boxSize)
-                                onPointsChanged(points + Offset(bitmapPos.x / baseScale, bitmapPos.y / baseScale))
+                                val bitmapPos = cropNow.toBitmapPos(tapPos, boxSize)
+                                onPointsChanged(currentPoints.value + Offset(bitmapPos.x / scale, bitmapPos.y / scale))
                                 zoomAnchorBitmap = null
                             }
                         }
