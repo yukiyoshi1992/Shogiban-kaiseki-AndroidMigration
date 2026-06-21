@@ -72,15 +72,20 @@ class MainActivity : ComponentActivity() {
     // Bluetoothシャッター（音量キー押下として届く）をシャッタートリガーにフックする
     // （アーキテクチャ検討.md 4節）。キャリブレーション撮影・対局中の両方で使えるよう
     // 音量アップ・ダウンの両方を対象にする（2026-06-21、ユーザー要望）。
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+    // onKeyDownではなくdispatchKeyEventで拾う：onKeyDownはディスパッチ経路の後段で呼ばれる
+    // ため、Compose側のフォーカス処理等に先に消費されて届かないことがある。dispatchKeyEventは
+    // ディスパッチの最初に呼ばれるため確実に拾える（実機テストでonKeyDownが反応しなかったため変更）。
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN &&
+            (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP || event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
+        ) {
             val trigger = shutterTrigger
             if (trigger != null) {
                 trigger.invoke()
                 return true
             }
         }
-        return super.onKeyDown(keyCode, event)
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onDestroy() {

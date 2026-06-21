@@ -64,7 +64,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.math.roundToInt
 
-private enum class CalibPhase { CAMERA, AUTO_SUBMITTING, TAPPING, SUBMITTING, MISMATCH, ERROR }
+private enum class CalibPhase { CAMERA, AUTO_SUBMITTING, TAPPING, SUBMITTING, ERROR }
 
 /** decodeForDisplay()が返す元画像（撮影フルサイズ）のピクセル寸法。タップ座標をこの基準に変換して送信する。 */
 private data class PixelSize(val width: Int, val height: Int)
@@ -94,7 +94,7 @@ fun CalibrationScreen(
     var capturedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var originalSize by remember { mutableStateOf(PixelSize(0, 0)) }
     var tapPoints by remember { mutableStateOf(listOf<Offset>()) }
-    var mismatchCount by remember { mutableStateOf(0) }
+    var tappingHint by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf("") }
 
     fun resetToCamera() {
@@ -104,19 +104,42 @@ fun CalibrationScreen(
         tapPoints = emptyList()
     }
 
-    fun handleCalibrationResult(file: File, points: List<List<Double>>?) {
+    fun proceedToConfirm() {
+        coroutineScope.launch {
+            confirmCalibration(
+                onSuccess = { onCalibrated() },
+                onError = { msg -> errorMessage = msg; phase = CalibPhase.ERROR }
+            )
+        }
+    }
+
+    // 自動検出（赤丸）モード：失敗・不一致いずれも人間の4隅タップにフォールバックする
+    // （前PJ run_realtime.py と同じ「エラーが出たら即・人間が直す」方針）。
+    fun handleAutoResult(file: File) {
+        coroutineScope.launch {
+            submitCalibration(file, points = null,
+                onMatch = { proceedToConfirm() },
+                onMismatch = { count ->
+                    tappingHint = "自動認識が初期配置と${count}箇所異なりました。盤の四隅をタップしてください"
+                    phase = CalibPhase.TAPPING
+                },
+                onCalibrationFailed = {
+                    tappingHint = "赤丸を検出できませんでした。盤の四隅をタップしてください"
+                    phase = CalibPhase.TAPPING
+                },
+                onError = { msg -> errorMessage = msg; phase = CalibPhase.ERROR }
+            )
+        }
+    }
+
+    // 手動4隅タップモード：人間が直接指定した結果は前PJの方針通り無条件に採用する
+    // （初期配置との不一致があっても、人間が見て決めた4隅を信頼し、再度のやり直しは求めない）。
+    fun handleManualResult(file: File, points: List<List<Double>>) {
         coroutineScope.launch {
             submitCalibration(file, points,
-                onMatch = {
-                    coroutineScope.launch {
-                        confirmCalibration(
-                            onSuccess = { onCalibrated() },
-                            onError = { msg -> errorMessage = msg; phase = CalibPhase.ERROR }
-                        )
-                    }
-                },
-                onMismatch = { count -> mismatchCount = count; phase = CalibPhase.MISMATCH },
-                onCalibrationFailed = { phase = CalibPhase.TAPPING },
+                onMatch = { proceedToConfirm() },
+                onMismatch = { proceedToConfirm() },
+                onCalibrationFailed = { errorMessage = "サーバ側でキャリブレーションに失敗しました"; phase = CalibPhase.ERROR },
                 onError = { msg -> errorMessage = msg; phase = CalibPhase.ERROR }
             )
         }
@@ -135,7 +158,7 @@ fun CalibrationScreen(
                 originalSize = size
                 tapPoints = emptyList()
                 phase = CalibPhase.AUTO_SUBMITTING
-                handleCalibrationResult(file, points = null)
+                handleAutoResult(file)
             }
         )
 
@@ -147,6 +170,7 @@ fun CalibrationScreen(
             modifier = modifier,
             bitmap = capturedBitmap!!,
             points = tapPoints,
+            hint = tappingHint,
             onPointsChanged = { tapPoints = it },
             onRetake = { resetToCamera() },
             onSubmit = { boxSizePx ->
@@ -157,20 +181,12 @@ fun CalibrationScreen(
                         (p.y / boxSizePx.height * originalSize.height).toDouble()
                     )
                 }
-                handleCalibrationResult(capturedFile!!, points = scaled)
+                handleManualResult(capturedFile!!, scaled)
             }
         )
 
         CalibPhase.SUBMITTING -> Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("サーバで判定中...")
-        }
-
-        CalibPhase.MISMATCH -> Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(text = "認識失敗：初期配置と${mismatchCount}箇所異なります")
-                Text(text = "盤の四隅タップがズレている可能性があります。撮影からやり直してください")
-                Button(onClick = { resetToCamera() }) { Text("撮影からやり直す") }
-            }
         }
 
         CalibPhase.ERROR -> Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -268,6 +284,7 @@ private fun TappingStep(
     modifier: Modifier,
     bitmap: Bitmap,
     points: List<Offset>,
+    hint: String,
     onPointsChanged: (List<Offset>) -> Unit,
     onRetake: () -> Unit,
     onSubmit: (boxSizePx: PixelSize) -> Unit
@@ -279,6 +296,9 @@ private fun TappingStep(
     val hitRadiusPx = with(density) { 28.dp.toPx() }
 
     Column(modifier = modifier.fillMaxSize()) {
+        if (hint.isNotEmpty()) {
+            Text(text = hint, modifier = Modifier.padding(8.dp))
+        }
         Text(
             text = "盤の四隅（マス目の角、駒台は不要）を押さえてドラッグで微調整してください（${points.size}/4）",
             modifier = Modifier.padding(8.dp)
