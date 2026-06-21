@@ -38,6 +38,17 @@ RUNTIME_GAMES_DIR = RUNTIME_DIR / "games"
 RUNTIME_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
 RUNTIME_GAMES_DIR.mkdir(parents=True, exist_ok=True)
 
+# 2026-06-22、タイムアウト調査用：[timing]ログをコンソールだけでなくファイルにも残す
+# （ユーザーにコンソールのコピペを頼まず、claude code側で直接読んで分析できるようにするため）。
+SERVER_LOG_PATH = RUNTIME_DIR / "server_timing.log"
+
+
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(f"[{ts}] {msg}\n")
+
 # 旧来の通信確認用ダミーエンドポイント（/photo）が使っていた保存先。本番フローは runtime/ 配下を使う。
 UPLOAD_DIR = BASE_DIR / "received_photos"
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -88,6 +99,7 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     # タイムアウトする」という再現性のある事象を調査するため、サーバ内処理の各段階の
     # 所要時間を計測してコンソールに出す（原因調査用、恒久的なログではない）。
     t_start = time.perf_counter()
+    _log(f"[calibration/photo] request received, mode={'auto' if points is None else 'manual'}")
     body = await file.read()
     t_body_read = time.perf_counter()
     img = _decode_image(body)
@@ -108,8 +120,9 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
         matrix = recognition.calibrate_from_image(img)
         t_calib = time.perf_counter()
         if matrix is None:
-            print(f"[timing] body_read={t_body_read-t_start:.2f}s decode={t_decode-t_body_read:.2f}s "
-                  f"save={t_save-t_decode:.2f}s calib={t_calib-t_save:.2f}s -> calibration_failed", flush=True)
+            _log(f"[timing] body_read={t_body_read-t_start:.2f}s decode={t_decode-t_body_read:.2f}s "
+                 f"save={t_save-t_decode:.2f}s calib={t_calib-t_save:.2f}s -> calibration_failed "
+                 f"(responding now)")
             return {"status": "calibration_failed", "reason": "red_circles_not_found"}
     else:
         try:
@@ -130,9 +143,9 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     session.pending_calibration = PendingCalibration(matrix=matrix, recognized=recognized)
     session.state = GameState.READY
     t_end = time.perf_counter()
-    print(f"[timing] body_read={t_body_read-t_start:.2f}s decode={t_decode-t_body_read:.2f}s "
-          f"save={t_save-t_decode:.2f}s calib={t_calib-t_save:.2f}s predict={t_predict-t_calib:.2f}s "
-          f"total={t_end-t_start:.2f}s", flush=True)
+    _log(f"[timing] body_read={t_body_read-t_start:.2f}s decode={t_decode-t_body_read:.2f}s "
+         f"save={t_save-t_decode:.2f}s calib={t_calib-t_save:.2f}s predict={t_predict-t_calib:.2f}s "
+         f"total={t_end-t_start:.2f}s -> ready (responding now, mismatch_count={len(mismatches)})")
     return {
         "status": "ready",
         "recognized": recognized,
