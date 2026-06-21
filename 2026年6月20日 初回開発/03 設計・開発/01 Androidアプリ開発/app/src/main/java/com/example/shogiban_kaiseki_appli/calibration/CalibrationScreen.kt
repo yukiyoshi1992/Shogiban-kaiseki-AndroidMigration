@@ -41,13 +41,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
@@ -285,61 +282,36 @@ private fun CameraCaptureStep(
     }
 }
 
-/** 拡大鏡（ルーペ）の表示位置・参照範囲。指が今どこを指しているかに応じて毎フレーム再計算する。 */
-private data class MagnifierGeom(
-    val dstLeft: Float,
-    val dstTop: Float,
-    val sizePx: Float,
-    val srcX: Int,
-    val srcY: Int,
-    val cropBitmapPx: Int,
-    val scaleToBitmap: Float
-)
+/** ズームイン表示で見せる範囲（実画像ピクセル座標系での切り出し矩形）。 */
+private data class ZoomCrop(val left: Float, val top: Float, val width: Float, val height: Float)
 
-private fun computeMagnifierGeom(
-    anchor: Offset,
-    canvasSize: IntSize,
-    bitmap: Bitmap,
-    measuredWidth: Int,
-    density: androidx.compose.ui.unit.Density
-): MagnifierGeom = with(density) {
-    val scaleToBitmap = bitmap.width.toFloat() / measuredWidth.coerceAtLeast(1)
-    val magnifierSizePx = 160.dp.toPx()
-    val cropBoxPx = 36.dp.toPx()
-    val cropBitmapPx = (cropBoxPx * 2 * scaleToBitmap).roundToInt().coerceAtLeast(1)
-    val centerBitmapX = anchor.x * scaleToBitmap
-    val centerBitmapY = anchor.y * scaleToBitmap
-    val srcX = (centerBitmapX - cropBitmapPx / 2f).roundToInt()
-        .coerceIn(0, (bitmap.width - cropBitmapPx).coerceAtLeast(0))
-    val srcY = (centerBitmapY - cropBitmapPx / 2f).roundToInt()
-        .coerceIn(0, (bitmap.height - cropBitmapPx).coerceAtLeast(0))
-    val gapPx = 24.dp.toPx()
-    var dstLeft = anchor.x - magnifierSizePx / 2f
-    var dstTop = anchor.y - magnifierSizePx - gapPx
-    if (dstTop < 0f) dstTop = anchor.y + gapPx
-    dstLeft = dstLeft.coerceIn(0f, (canvasSize.width - magnifierSizePx).coerceAtLeast(0f))
-    dstTop = dstTop.coerceIn(0f, (canvasSize.height - magnifierSizePx).coerceAtLeast(0f))
-    MagnifierGeom(dstLeft, dstTop, magnifierSizePx, srcX, srcY, cropBitmapPx, scaleToBitmap)
+private const val TAP_ZOOM_FACTOR = 4f
+
+private fun computeZoomCrop(anchorBitmap: Offset, bitmap: Bitmap): ZoomCrop {
+    val cropW = bitmap.width / TAP_ZOOM_FACTOR
+    val cropH = bitmap.height / TAP_ZOOM_FACTOR
+    val left = (anchorBitmap.x - cropW / 2f).coerceIn(0f, (bitmap.width - cropW).coerceAtLeast(0f))
+    val top = (anchorBitmap.y - cropH / 2f).coerceIn(0f, (bitmap.height - cropH).coerceAtLeast(0f))
+    return ZoomCrop(left, top, cropW, cropH)
 }
 
-/** posが拡大鏡の表示矩形内にあれば、拡大元（実画像）の対応位置に逆変換して返す。範囲外ならnull。 */
-private fun MagnifierGeom.mapIfInside(pos: Offset): Offset? {
-    if (pos.x < dstLeft || pos.x > dstLeft + sizePx || pos.y < dstTop || pos.y > dstTop + sizePx) return null
-    val fracX = (pos.x - dstLeft) / sizePx
-    val fracY = (pos.y - dstTop) / sizePx
-    val bitmapX = srcX + fracX * cropBitmapPx
-    val bitmapY = srcY + fracY * cropBitmapPx
-    return Offset(bitmapX / scaleToBitmap, bitmapY / scaleToBitmap)
+private fun ZoomCrop.toBitmapPos(displayPos: Offset, boxSize: IntSize): Offset {
+    val fracX = displayPos.x / boxSize.width.coerceAtLeast(1)
+    val fracY = displayPos.y / boxSize.height.coerceAtLeast(1)
+    return Offset(left + fracX * width, top + fracY * height)
+}
+
+private fun ZoomCrop.toDisplayPos(bitmapPos: Offset, boxSize: IntSize): Offset {
+    val fracX = (bitmapPos.x - left) / width
+    val fracY = (bitmapPos.y - top) / height
+    return Offset(fracX * boxSize.width, fracY * boxSize.height)
 }
 
 /**
- * 盤の四隅タップ用ステップ。タップ＝指を置いた瞬間にその位置へ点を置き、指を離すまでドラッグで
- * 微調整できる。ドラッグ中は指の周辺を拡大した「ルーペ」を表示し、細かい位置決めをしやすくする
- * （2026-06-21、「タップの難易度が高すぎる」というユーザー指摘への対応）。
- * 既存の点の近く（hitRadius以内）でドラッグを始めればその点を再調整、それ以外の場所なら
- * 新しい点を追加する（4点に達したら無視）。
- * ルーペの表示範囲そのものに指を移動してドラッグすると、拡大された範囲内での微調整として扱う
- * （ルーペは見るだけで触れても反応しない、という分かりにくさへの対応、2026-06-21）。
+ * 盤の四隅タップ用ステップ。「①概観でおおまかにタップ→②その周辺が拡大表示される→
+ * ③拡大表示の中で正確に角をタップして確定→④概観に戻る」を4回繰り返す方式
+ * （2026-06-21、「ドラッグ＋ルーペ」方式がどう使えばいいか分からないというユーザー指摘を受け、
+ * UIを全面的に作り直した）。
  */
 @Composable
 private fun TappingStep(
@@ -351,102 +323,81 @@ private fun TappingStep(
     onRetake: () -> Unit,
     onSubmit: (boxSizePx: PixelSize) -> Unit
 ) {
-    val density = LocalDensity.current
     val aspect = bitmap.width.toFloat() / bitmap.height.toFloat()
     var measuredSize by remember { mutableStateOf(PixelSize(1, 1)) }
-    var magnifierGeom by remember { mutableStateOf<MagnifierGeom?>(null) }
-    val hitRadiusPx = with(density) { 28.dp.toPx() }
+    var zoomAnchorBitmap by remember { mutableStateOf<Offset?>(null) }
+    val baseScale = bitmap.width.toFloat() / measuredSize.width.coerceAtLeast(1)
 
     Column(modifier = modifier.fillMaxSize()) {
         if (hint.isNotEmpty()) {
             Text(text = hint, modifier = Modifier.padding(8.dp))
         }
         Text(
-            text = "盤の四隅（マス目の角、駒台は不要）を押さえてください。表示される拡大鏡の中をそのまま指でなぞって微調整し、ちょうどよい位置で指を離してください（${points.size}/4）",
+            text = if (zoomAnchorBitmap == null) {
+                "盤の四隅（マス目の角、駒台は不要）のあたりをタップしてください（${points.size}/4）"
+            } else {
+                "拡大表示されました。角を正確にタップして確定してください"
+            },
             modifier = Modifier.padding(8.dp)
         )
         BoxWithConstraints(modifier = Modifier.fillMaxWidth().weight(1f)) {
             val boxHeightDp = maxWidth / aspect
+            val crop = zoomAnchorBitmap?.let { computeZoomCrop(it, bitmap) }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(boxHeightDp)
                     .onSizeChanged { measuredSize = PixelSize(it.width, it.height) }
-                    .pointerInput(points) {
-                        awaitEachGesture {
-                            val down = awaitFirstDown()
-                            val startPos = down.position
-                            val nearestIndex = points.indices.minByOrNull { i ->
-                                (points[i] - startPos).getDistance()
-                            }
-                            val targetIndex = if (
-                                nearestIndex != null &&
-                                (points[nearestIndex] - startPos).getDistance() < hitRadiusPx
-                            ) {
-                                nearestIndex
-                            } else if (points.size < 4) {
-                                points.size
-                            } else {
-                                null
-                            }
-                            if (targetIndex == null) return@awaitEachGesture
-
-                            val canvasSize = IntSize(measuredSize.width, measuredSize.height)
-                            var pointPos = startPos
-                            var current = points.toMutableList()
-                            if (targetIndex == current.size) current.add(pointPos) else current[targetIndex] = pointPos
-                            onPointsChanged(current.toList())
-                            var geom = computeMagnifierGeom(pointPos, canvasSize, bitmap, measuredSize.width, density)
-                            magnifierGeom = geom
-                            down.consume()
-
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                if (change.changedToUp()) {
-                                    magnifierGeom = null
-                                    break
+                    .pointerInput(crop, points, measuredSize) {
+                        detectTapGestures { tapPos ->
+                            val boxSize = IntSize(measuredSize.width, measuredSize.height)
+                            if (crop == null) {
+                                if (points.size < 4) {
+                                    zoomAnchorBitmap = Offset(tapPos.x * baseScale, tapPos.y * baseScale)
                                 }
-                                // ルーペの表示範囲内をなぞった場合は拡大された範囲内での移動として解釈し、
-                                // それ以外は実画像上の通常のドラッグとして扱う。
-                                pointPos = geom.mapIfInside(change.position) ?: change.position
-                                current = current.toMutableList()
-                                current[targetIndex] = pointPos
-                                onPointsChanged(current.toList())
-                                geom = computeMagnifierGeom(pointPos, canvasSize, bitmap, measuredSize.width, density)
-                                magnifierGeom = geom
-                                change.consume()
+                            } else {
+                                val bitmapPos = crop.toBitmapPos(tapPos, boxSize)
+                                onPointsChanged(points + Offset(bitmapPos.x / baseScale, bitmapPos.y / baseScale))
+                                zoomAnchorBitmap = null
                             }
                         }
                     }
             ) {
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize()
-                )
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    points.forEach { p -> drawCircle(color = Color.Red, radius = 12f, center = p) }
-
-                    val geom = magnifierGeom
-                    if (geom != null) {
+                if (crop == null) {
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        points.forEach { p -> drawCircle(color = Color.Red, radius = 12f, center = p) }
+                    }
+                } else {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val boxSize = IntSize(size.width.roundToInt(), size.height.roundToInt())
                         drawImage(
                             image = bitmap.asImageBitmap(),
-                            srcOffset = IntOffset(geom.srcX, geom.srcY),
-                            srcSize = IntSize(geom.cropBitmapPx, geom.cropBitmapPx),
-                            dstOffset = IntOffset(geom.dstLeft.roundToInt(), geom.dstTop.roundToInt()),
-                            dstSize = IntSize(geom.sizePx.roundToInt(), geom.sizePx.roundToInt())
+                            srcOffset = IntOffset(crop.left.roundToInt(), crop.top.roundToInt()),
+                            srcSize = IntSize(
+                                crop.width.roundToInt().coerceAtLeast(1),
+                                crop.height.roundToInt().coerceAtLeast(1)
+                            ),
+                            dstOffset = IntOffset.Zero,
+                            dstSize = boxSize
                         )
-                        drawRect(
-                            color = Color.White,
-                            topLeft = Offset(geom.dstLeft, geom.dstTop),
-                            size = androidx.compose.ui.geometry.Size(geom.sizePx, geom.sizePx),
-                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f)
-                        )
-                        val centerX = geom.dstLeft + geom.sizePx / 2f
-                        val centerY = geom.dstTop + geom.sizePx / 2f
-                        drawLine(Color.Red, Offset(centerX - 14f, centerY), Offset(centerX + 14f, centerY), strokeWidth = 3f)
-                        drawLine(Color.Red, Offset(centerX, centerY - 14f), Offset(centerX, centerY + 14f), strokeWidth = 3f)
+                        // 拡大範囲内に確定済みの点があれば参考として表示する。
+                        points.forEach { p ->
+                            val bitmapPos = Offset(p.x * baseScale, p.y * baseScale)
+                            if (bitmapPos.x in crop.left..(crop.left + crop.width) &&
+                                bitmapPos.y in crop.top..(crop.top + crop.height)
+                            ) {
+                                drawCircle(color = Color.Red, radius = 8f, center = crop.toDisplayPos(bitmapPos, boxSize))
+                            }
+                        }
+                        val centerX = boxSize.width / 2f
+                        val centerY = boxSize.height / 2f
+                        drawLine(Color.Yellow, Offset(centerX - 20f, centerY), Offset(centerX + 20f, centerY), strokeWidth = 3f)
+                        drawLine(Color.Yellow, Offset(centerX, centerY - 20f), Offset(centerX, centerY + 20f), strokeWidth = 3f)
                     }
                 }
             }
@@ -455,9 +406,13 @@ private fun TappingStep(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
             horizontalArrangement = Arrangement.SpaceEvenly
         ) {
-            Button(onClick = onRetake) { Text("撮り直す") }
-            Button(onClick = { onPointsChanged(emptyList()) }, enabled = points.isNotEmpty()) { Text("タップをやり直す") }
-            Button(enabled = points.size == 4, onClick = { onSubmit(measuredSize) }) { Text("送信") }
+            if (zoomAnchorBitmap != null) {
+                Button(onClick = { zoomAnchorBitmap = null }) { Text("ズーム解除") }
+            } else {
+                Button(onClick = onRetake) { Text("撮り直す") }
+                Button(onClick = { onPointsChanged(emptyList()) }, enabled = points.isNotEmpty()) { Text("タップをやり直す") }
+                Button(enabled = points.size == 4, onClick = { onSubmit(measuredSize) }) { Text("送信") }
+            }
         }
     }
 }
