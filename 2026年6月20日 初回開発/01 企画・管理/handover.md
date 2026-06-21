@@ -127,14 +127,21 @@
    - `network/PhotoApiService.kt`・`network/RetrofitClient.kt`（Retrofitで`/photo`へmultipart POST）
    - `camera/CameraScreen.kt`（CameraXのPreviewView表示＋シャッターボタンで撮影→`takePicture`→撮影完了コールバックで自動アップロード、状態をテキスト表示）
    - `MainActivity.kt`を書き換え、起動時にカメラ権限をランタイムリクエストする`CameraPermissionGate`を追加。許可済みなら`CameraScreen`を表示
-3. **ビルド確認は未完**：NAS共有のUNCパス上でPowerShell/cmdからGradle CLIビルド（`gradlew.bat :app:compileDebugKotlin`）を試したが、UNCパス非対応・ドライブマッピングの問題で断念（時間をかけすぎないよう撤退）。コードは目視レビュー済みだが、**実際のコンパイル確認はユーザーがAndroid Studioで同期・実行するまで未検証**。
+3. **ビルド確認・実機テストまで完了**：CLI Gradleビルドの試行はUNCパス問題で撤退したが、Android Studio側でユーザーがGradle Sync→Run。コンパイルエラー2件発生・修正済み：
+   - `CameraScreen.kt`の`it.surfaceProvider = ...`（プロパティ構文）→`Preview`にgetterがないため未解決。`it.setSurfaceProvider(...)`呼び出しに修正
+   - 平文HTTP通信が`not permitted by network security policy`でブロック→`AndroidManifest.xml`の`<application>`に`android:usesCleartextTraffic="true"`を追加
+4. **LAN IP設定**：PCのIP`192.168.0.24`を`network/ApiConfig.kt`の`BASE_URL`に設定
+5. **実機↔サーバ通信が一度ブロックされた件と解決**：上記2点を直しても「fail to connect」が続いた。原因はファイアウォールではなく、**Windowsがこの接続を「パブリックネットワーク」と認識していたこと**（パブリック側ファイアウォールは無効化していなかったため、外部からの接続が拒否され続けていた）。Windows設定→ネットワークとインターネット→イーサネット→接続名をクリック→「プライベートネットワーク」に切り替えて解決。**新しい教訓としてCLAUDE.mdに追記**（このPCで同種のテストをする際は、まずネットワークプロファイルがプライベートになっているか確認すること）。
+6. **エンドツーエンド動作確認完了**：OPPOでシャッター→撮影→Retrofitでアップロード→FastAPIサーバが受信→`received_photos/`に保存、まで一連の流れが実機で動作確認済み。
+7. Discordチャンネルへの返信で、`<channel>`タグなしの「割り込みメッセージ」形式で届いた際にreplyツールの呼び出しを何度か忘れる事故が連発（ユーザーから複数回指摘）。CLAUDE.mdに再発防止メモを追記し、プロジェクト直下に`.claude/settings.json`でStop hookによる毎ターンのリマインダー表示も追加（人間側へのセーフティネット、完全な自動ブロックではない）。
 
 ### 次回／ユーザーに依頼すること
-1. **Android Studioでこのプロジェクトを開き、Gradle Sync→実機(OPPO)で実行**して、コンパイルエラーがないか・カメラプレビューが映るか確認してもらう（コンパイルエラーが出た場合は内容を貼ってもらえれば修正する）
-2. **PCのLAN IPアドレスを確認**（コマンドプロンプトで`ipconfig`→「IPv4 アドレス」）→`network/ApiConfig.kt`の`BASE_URL`をそのIPに書き換える（現在`192.168.1.100`はダミー値）
-3. **FastAPIサーバを起動**：`03 設計・開発/02 API開発/`で`pip install -r requirements.txt`→`uvicorn main:app --host 0.0.0.0 --port 8000`
-4. スマホとPCが同じWi-Fi/LANに接続されていることを確認の上、アプリでシャッターを押し、PC側`received_photos/`フォルダに画像が保存されるか確認
+1. ~~Android Studioでビルド確認~~ → 完了（コンパイルエラー2件修正済み、実機起動・カメラプレビュー確認済み）
+2. ~~LAN IP設定~~ → 完了（`192.168.0.24`）
+3. ~~FastAPIサーバ起動・実機テスト~~ → 完了（撮影→送信→保存の一連の流れが動作）
+4. **次の増分**：サーバ側`/photo`エンドポイントに前PJの認識ロジック（`classify_frame`等）を統合する作業がまだ（現状は写真を保存するだけのダミー実装）。これが次の本丸タスク。
+5. Androidプロジェクトのルートに置かれたUAT参考画像（`IMG_20260620_122007.jpg`）の扱い（資料として残すか削除するか）をユーザーに確認中。
 
 ## 中断・再開について
 
-次回セッション開始時は「`CLAUDE.md`と`01 企画・管理/handover.md`を読んで状況を整理して」と伝えれば続きから再開できる。直近の状態は「セッション3」セクションの「次回/ユーザーに依頼すること」から続行する。
+次回セッション開始時は「`CLAUDE.md`と`01 企画・管理/handover.md`を読んで状況を整理して」と伝えれば続きから再開できる。直近の状態は「セッション3」セクションの「次回/ユーザーに依頼すること」の項目4（前PJ認識ロジックのサーバ統合）から続行する。

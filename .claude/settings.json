@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"systemMessage\": \"[Discordチェック] このターンの返信は、Discordでのやり取りなら mcp__plugin_discord_discord__reply で送信済みですか？\"}'",
+            "shell": "bash",
+            "statusMessage": "Discord返信チェック"
+          }
+        ]
+      }
+    ]
+  }
+}
