@@ -13,10 +13,10 @@ object RetrofitClient {
         }
         val client = OkHttpClient.Builder()
             .addInterceptor(logging)
+            // 2026-06-21、タイムアウト原因調査用。アップロード完了までの時間と応答待ちの時間を
+            // 分けて計測し、NetworkTiming.lastSummaryに記録する（詳細はNetworkTiming.kt参照）。
+            .eventListener(TimingEventListener())
             .connectTimeout(10, TimeUnit.SECONDS)
-            // 2026-06-21、実機テストで盤面写真(2〜3.5MB、壁の写真の0.9MBより大幅に大きい)の
-            // キャリブレーション通信でタイムアウトが発生。サーバ側の処理は2〜3秒で完了している
-            // ことを実測済みなので、原因はアップロードにかかる時間と判断し、read/writeを伸ばした。
             .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
             .build()

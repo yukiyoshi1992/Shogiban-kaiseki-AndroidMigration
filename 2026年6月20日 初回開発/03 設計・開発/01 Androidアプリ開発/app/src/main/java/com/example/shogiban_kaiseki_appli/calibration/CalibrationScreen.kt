@@ -540,7 +540,9 @@ private suspend fun submitCalibration(
             else -> onMismatch(body.mismatch_count ?: -1)
         }
     } catch (e: Exception) {
-        onError(e.message ?: "通信エラー")
+        // 2026-06-21、タイムアウト原因調査用：アップロード完了までの時間と応答待ちの時間を
+        // 画面のエラー表示に含める（Logcatを見られない状況でも切り分けられるようにするため）。
+        onError("${e.message ?: "通信エラー"} [${com.example.shogiban_kaiseki_appli.network.NetworkTiming.lastSummary}]")
     }
 }
 
