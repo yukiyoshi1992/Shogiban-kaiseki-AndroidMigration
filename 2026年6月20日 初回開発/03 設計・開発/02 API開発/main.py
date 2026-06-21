@@ -15,6 +15,7 @@
 """
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -83,21 +84,32 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     同じ写真に対して盤の4隅座標を添えてこのエンドポイントを再度呼ぶ（人間のフォールバック）。
     pointsを指定した場合は常にその4点座標（JSON配列 "[[x1,y1],...,[x4,y4]]"、順不同）を使う。
     """
-    img = _decode_image(await file.read())
+    # 2026-06-21、実機で「サーバはuvicornログ上200 OKで完了しているのにクライアント側が
+    # タイムアウトする」という再現性のある事象を調査するため、サーバ内処理の各段階の
+    # 所要時間を計測してコンソールに出す（原因調査用、恒久的なログではない）。
+    t_start = time.perf_counter()
+    body = await file.read()
+    t_body_read = time.perf_counter()
+    img = _decode_image(body)
     if img is None:
         raise HTTPException(400, "failed to decode image")
+    t_decode = time.perf_counter()
 
     # 状態チェックより前に必ず保存する（赤丸検出が失敗するケースほど原因調査に写真が必要なため。
     # 2026-06-21、状態チェックの409エラーが保存より先に発生し写真が一切残らない回帰が発生したため、
     # 保存を状態チェックより前に移動した）。
     _save_runtime_photo(img, "calib")
+    t_save = time.perf_counter()
 
     if session.state not in (GameState.IDLE, GameState.READY):
         raise HTTPException(409, f"calibration not allowed in state={session.state.value}")
 
     if points is None:
         matrix = recognition.calibrate_from_image(img)
+        t_calib = time.perf_counter()
         if matrix is None:
+            print(f"[timing] body_read={t_body_read-t_start:.2f}s decode={t_decode-t_body_read:.2f}s "
+                  f"save={t_save-t_decode:.2f}s calib={t_calib-t_save:.2f}s -> calibration_failed", flush=True)
             return {"status": "calibration_failed", "reason": "red_circles_not_found"}
     else:
         try:
@@ -108,13 +120,19 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
             raise HTTPException(400, "points must be a JSON array of exactly 4 [x, y] pairs")
         ordered = recognition.order_points(pts)
         matrix = recognition.compute_calib(ordered)
+        t_calib = time.perf_counter()
 
     warped = recognition.warp_board(img, matrix)
     recognized = recognition.predict_board(MODEL, warped)
+    t_predict = time.perf_counter()
     mismatches = recognition.compare_to_initial(recognized)
 
     session.pending_calibration = PendingCalibration(matrix=matrix, recognized=recognized)
     session.state = GameState.READY
+    t_end = time.perf_counter()
+    print(f"[timing] body_read={t_body_read-t_start:.2f}s decode={t_decode-t_body_read:.2f}s "
+          f"save={t_save-t_decode:.2f}s calib={t_calib-t_save:.2f}s predict={t_predict-t_calib:.2f}s "
+          f"total={t_end-t_start:.2f}s", flush=True)
     return {
         "status": "ready",
         "recognized": recognized,
