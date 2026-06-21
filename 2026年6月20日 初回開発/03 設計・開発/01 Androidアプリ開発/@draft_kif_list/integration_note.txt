@@ -1,0 +1,32 @@
+[DRAFT] KIF一覧・共有画面（未統合、2026-06-21作成）
+
+このフォルダはまだ src/main/java/ 配下にコピーしていない試作コード。
+現在進行中の実機テスト（キャリブレーション・対局フロー）に影響を与えないよう、
+あえてビルド対象外の場所に置いている。
+
+含まれるファイル（package com.example.shogiban_kaiseki_appli.gamelist）:
+  - GameListModels.kt    サーバ GET /games・GET /games/{id} のレスポンス型
+  - GameListApiService.kt  上記2エンドポイントのRetrofitインターフェース
+  - GameListScreen.kt    一覧表示→タップでKIF本文表示→「共有」でAndroid標準の
+                         共有シート（LINE/メール等、ACTION_SEND）を開くComposable
+
+統合手順（テストする際）:
+  1. この3つの.ktファイルを
+     app/src/main/java/com/example/shogiban_kaiseki_appli/gamelist/ にコピー
+     （フォルダを新規作成）。
+  2. MainActivity.kt の AppScreen に GameList を追加し、ShogiAppFlow の
+     when分岐に GameListScreen(...) を追加する。入口は対局を始める前の
+     キャリブレーション画面（idle相当）に「過去の対局を見る」ボタンを
+     追加するのが自然（アプリ要件「②結果共有時」は対局中の機能ではないため）。
+  3. 動作確認のみが目的ならこのままで良いが、本実装に格上げする場合は
+     GameListScreen.kt 内の private object GameListRetrofit
+     （独自にRetrofitインスタンスを構築している）を削除し、代わりに
+     network/RetrofitClient.kt に shogiApiService と同じパターンで
+     gameListApiService を追加して使う（OkHttpClientの設定を1か所に
+     まとめるため）。
+
+未対応・意図的に入れていないもの:
+  - KENTO連携（今後の検討事項No.1）：引き渡し方式（API/ファイル/URL、
+    アプリ内WebView/外部ブラウザ）がまだ未決定のため、共有ボタンは
+    Android標準の共有シートのみ。KENTO固有の連携はここでは未着手。
+  - 個別KIFの削除・編集機能：要件に記載がないため未実装。
