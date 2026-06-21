@@ -138,7 +138,11 @@ fun PlayScreen(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                val previewView = PreviewView(ctx)
+                val previewView = PreviewView(ctx).apply {
+                    // デフォルトのFILL_CENTERはプレビューを拡大表示するため、実際の撮影範囲より
+                    // 狭く見える（ズームされて見える）。FIT_CENTERで実際の撮影範囲どおりに表示する。
+                    scaleType = PreviewView.ScaleType.FIT_CENTER
+                }
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
                 cameraProviderFuture.addListener({
                     val cameraProvider = cameraProviderFuture.get()

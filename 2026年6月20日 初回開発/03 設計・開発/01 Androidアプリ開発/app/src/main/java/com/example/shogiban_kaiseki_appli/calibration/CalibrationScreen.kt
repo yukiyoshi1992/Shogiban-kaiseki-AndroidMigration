@@ -168,7 +168,12 @@ private fun CameraCaptureStep(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                val previewView = PreviewView(ctx)
+                val previewView = PreviewView(ctx).apply {
+                    // デフォルトのFILL_CENTERだとプレビューが表示枠いっぱいに拡大され、
+                    // 実際の撮影範囲より狭く（ズームされたように）見えてしまう。
+                    // FIT_CENTERにして撮影される範囲をそのまま（レターボックス込みで）表示する。
+                    scaleType = PreviewView.ScaleType.FIT_CENTER
+                }
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
                 cameraProviderFuture.addListener({
                     val cameraProvider = cameraProviderFuture.get()
