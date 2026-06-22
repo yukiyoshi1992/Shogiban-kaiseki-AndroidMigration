@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import com.example.shogiban_kaiseki_appli.calibration.CalibrationScreen
+import com.example.shogiban_kaiseki_appli.gamelist.GameListScreen
 import com.example.shogiban_kaiseki_appli.play.PlayScreen
 import com.example.shogiban_kaiseki_appli.ui.theme.ShogibankaisekiappliTheme
 import java.util.Locale
@@ -105,6 +106,9 @@ class MainActivity : ComponentActivity() {
 private sealed class AppScreen {
     object Calibration : AppScreen()
     object Playing : AppScreen()
+    // 2026-06-22、アプリ要件「②結果共有時」：対局を始める前（idle相当）から入れる、
+    // 過去のKIF一覧・共有画面。対局中の機能ではないのでPlayingからは入れない。
+    object GameList : AppScreen()
 }
 
 @Composable
@@ -122,11 +126,19 @@ private fun ShogiAppFlow(
                 setKeepScreenOn(false)
                 onDispose {}
             }
-            CalibrationScreen(
-                modifier = modifier,
-                registerShutterTrigger = registerShutterTrigger,
-                onCalibrated = { screen = AppScreen.Playing }
-            )
+            // CalibrationScreen自体は変更せず、Box重ね合わせで「過去の対局」ボタンだけ
+            // 追加する（実機テスト中の既存キャリブレーション画面の挙動に影響を与えないため）。
+            Box(modifier = modifier.fillMaxSize()) {
+                CalibrationScreen(
+                    modifier = Modifier.fillMaxSize(),
+                    registerShutterTrigger = registerShutterTrigger,
+                    onCalibrated = { screen = AppScreen.Playing }
+                )
+                Button(
+                    onClick = { screen = AppScreen.GameList },
+                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)
+                ) { Text("過去の対局") }
+            }
         }
         is AppScreen.Playing -> {
             DisposableEffect(Unit) {
@@ -138,6 +150,16 @@ private fun ShogiAppFlow(
                 tts = tts,
                 registerShutterTrigger = registerShutterTrigger,
                 onGameEnded = { screen = AppScreen.Calibration }
+            )
+        }
+        is AppScreen.GameList -> {
+            DisposableEffect(Unit) {
+                setKeepScreenOn(false)
+                onDispose {}
+            }
+            GameListScreen(
+                modifier = modifier,
+                onBack = { screen = AppScreen.Calibration }
             )
         }
     }
