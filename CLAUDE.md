@@ -6,15 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working in this
 
 このプロジェクトはユーザーとDiscord経由でも連絡を取り合う運用（`01 企画・管理/handover.md`参照）。Discordツール（`reply`/`fetch_messages`等、`plugin:discord:discord`提供）が読み込まれない事象が繰り返し発生し、ユーザーの時間を大きく無駄にした。**原因は確定済み・対処法も確定済み**。次回以降のセッションは原因をもう一度調査し直す必要はない。以下を**毎セッション開始時、本格的な作業に入る前に必ず実行**すること。
 
-**実行手順（調査不要、そのまま実行）：**
+**実行手順（2026-06-23訂正版。調査不要、そのまま実行）：**
 1. ToolSearchで`select:mcp__plugin_discord_discord__reply`等を確認し、Discordツールが読み込まれているか見る。
-2. **読み込まれているかどうかに関わらず**、毎回必ずBashで次のコマンドを実行する（`dangerouslyDisableSandbox: true`を付ける。プロジェクト外のホームディレクトリ配下のため）：
-   `bun install --no-summary --cwd "/c/Users/<ユーザー>/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/discord"`
-   これはbunのグローバルキャッシュ（`~/.bun/install/cache`）を温めておくための定常メンテナンスで、キャッシュが温かければ数秒（実測3秒）で終わる。**「今繋がっているから不要」ではなく、次に誰かがセッションを再起動した時のために毎回やる**（`node_modules`はセッションをまたいで毎回空に戻る仕様なので、温め直しておかないと次回また同じ問題が起きる）。
+2. **読み込まれているかどうかに関わらず**、毎回必ずBashで次の2コマンドを実行する（`dangerouslyDisableSandbox: true`を付ける。プロジェクト外のホームディレクトリ配下のため）。**重要：対象ディレクトリは`marketplaces/.../external_plugins/discord`ではない**——実際にMCP起動時に使われる`CLAUDE_PLUGIN_ROOT`は`~/.claude/plugins/cache/claude-plugins-official/discord/<バージョン番号>/`（`.in_use/`マーカーファイルの生成タイミングで確認済み）。バージョン番号は変わる可能性があるため`*`でglobすること：
+   ```
+   cd ~/.claude/plugins/cache/claude-plugins-official/discord/*/ && bun install --no-summary
+   bun -e "await import('discord.js'); await import('@modelcontextprotocol/sdk/server/index.js');"
+   ```
+   1行目（`bun install`）は依存解決の確認用（通常0.2秒、ほぼ常に瞬時）。**2行目が本当に重要な手順**：discord.js等の依存モジュールを実際にインポートし、ファイルへの「初回アクセス」を今のうちに済ませておく（詳細は下記2026-06-23朝の追加調査を参照、初回13.66秒・2回目以降0.64秒という実測差を確認済み）。これを毎セッション開始時に行うことで、Claude Code本体がMCPサーバーを起動する際にはこの初回アクセス分の遅延を払わずに済む。
 3. 手順1でツールが見つかっていれば、それで完了。ユーザーに繋がっている旨を一報して本来の作業に進む。
 4. 手順1でツールが見つからなければ：手順2を実行済みであることを踏まえ、**ユーザーに「このターミナルセッションを終了して新しいセッションを開始してください」と伝える**（`/reload-plugins`では直らない、既知の制約）。新セッションでまた手順1〜2を実行する。
 
-**この問題の背景（参考情報、対処には不要）**：Discordプラグインのサーバーは起動時に毎回`bun install --no-summary && bun server.ts`を実行する設計（`package.json`の`start`スクリプト）。`node_modules`はセッションをまたいで消えるため、bunのグローバルキャッシュが冷えていると依存解決にnpmレジストリへの通信が必要になり、Claude Code側のMCPサーバー起動待ち時間内に終わらずツールがロードされない。**Discord側（トークン有効性・Gateway到達性・Intents設定）はこの問題と無関係で、無罪と確認済み**（discord.jsの`Client.login()`単体テストで数秒で`ready`に到達する）。
+**この問題の背景（参考情報、対処には不要）**：Discordプラグインのサーバーは起動時に毎回`bun install --no-summary && bun server.ts`を実行する設計（`package.json`の`start`スクリプト）。**Discord側（トークン有効性・Gateway到達性・Intents設定）はこの問題と無関係で、無罪と確認済み**（discord.jsの`Client.login()`単体テストで数秒で`ready`に到達する）。
 
 **もし上記手順を実行してもなお繋がらない場合**（ユーザーに再起動してもらってもツールが出ない）、それは2026-06-21に確定した原因とは別の問題。その場合の注意：
 - `bun run --cwd <discordプラグインdir> --shell=bun --silent start`をBashから単発実行して様子を見る診断方法は**使えない**——stdinがすぐEOFになり、サーバー側のシャットダウンハンドラが即座に動いて`discord channel: shutting down`しか出力されない（実際の不具合ではなく、単体実行という方法自体の制約）。
@@ -24,6 +27,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working in this
 **2026-06-23未明、有力な手がかり（未確定・本体側の問題の可能性、※下記2026-06-23朝の訂正で否定された）**：実際の起動シーケンス全体（`bun install`→`bun server.ts`起動→discordログイン完了）を計測したところ、キャッシュが温かくても**5〜16秒程度**かかることを確認した（単体の`bun install`は0.08秒）。「条件が同じでも繋がる時と繋がらない時がある」というユーザーの報告と整合する——Claude Code側のMCPサーバー起動待ちタイムアウトと、この起動時間がギリギリ競合している可能性が高い。**この仮説が正しければ原因はClaude Code本体側にあり、このプロジェクトからは直せない**（プラグイン自体はAnthropic公式のもので書き換えは不適切）。ユーザーが本気で直したい場合は`/help`またはhttps://github.com/anthropics/claude-code/issues へのフィードバック報告が次の一手。
 
 **2026-06-23朝、訂正：上記の「ギリギリの短いタイムアウトとの競合」説は誤りだった。実際のログを発見し、本当の数字を確認した。** ユーザーが「自動でリトライできないか」と再度聞いてきたのを受け、これまで探していなかったログの場所`%USERPROFILE%\AppData\Local\claude-cli-nodejs\Cache\<プロジェクト>\mcp-logs-plugin-discord-discord\*.jsonl`を発見（過去のセッションは`~/.claude/`配下しか探していなかった）。実際のタイムアウト設定は**30000ms（30秒）**で、想定していた「ギリギリの短い時間」ではなく十分余裕がある値だった。それでも記録されていた1件（2026-06-22 23:38:14開始）は**31491msかかってタイムアウト**していた。さらに`server.ts`を読み直すと、MCPサーバーとしての接続確立（`await mcp.connect(new StdioServerTransport())`）は`client.login(TOKEN)`より**前**に行われる処理だと確認した——つまりDiscordへのログイン処理の遅さは、MCP接続確立そのものの遅延とは無関係（Claude Code側が待っているのはMCP接続確立であり、それはDiscordログインより前に完了するはずの処理）。bun単体の`bun install`は1.3秒で終わったため、「冷えたキャッシュの依存解決」という単純な話でもない。**現時点の最有力候補（未確定）：Windows Defender等のリアルタイムスキャンが`bun.exe`や`node_modules`配下の大量の小ファイルへの初回アクセス時に介入し、プロセス起動自体を数秒〜30秒以上遅らせている**——Windows環境でこの種の「同じ条件でも時々すごく遅い」症状の典型的な原因。ユーザーへの提案：`bun.exe`またはプラグインキャッシュフォルダ（`%USERPROFILE%\.claude\plugins\cache\claude-plugins-official\discord\`）をDefenderの除外設定に追加してみる（確定的な修正ではなく、試す価値のある対策として提示）。`settings.json`・`.mcp.json`どちらにもMCP接続のリトライ回数・タイムアウト値を設定する項目は存在しない（再確認済み）——「自動リトライ」をこちら側から指示する手段は今のところない。詳細は`feedback_discord_reconnect_needs_new_session`メモリ参照。
+
+**2026-06-23朝、続報・対象ディレクトリの誤りを発見＋初回アクセス遅延を実測で確定。** ユーザーから「discordが一番最初。つながらないなら全部関連モジュールを再インストールするなどして1からやろう」との指示を受け、再インストールの前に実際の起動経路を直接調査した。重大な発見：**これまでの「最優先」手順が温めていたディレクトリ（`marketplaces/.../external_plugins/discord`）は、実際にMCP起動時に使われる`CLAUDE_PLUGIN_ROOT`ではなかった**——`.mcp.json`の`${CLAUDE_PLUGIN_ROOT}`が実際に展開される先は`~/.claude/plugins/cache/claude-plugins-official/discord/0.0.4/`で、このディレクトリにだけ`node_modules`（6/19作成）と`.in_use/`マーカーフォルダがあり、ToolSearch実行直後にこのセッションのPIDでマーカーファイルが新規作成されたことで実証した。つまり過去セッションの`bun install`によるキャッシュ温め直しは、ずっと無関係な場所に対して行われていた可能性が高い（それでも時々繋がっていたのは、bunのグローバルパッケージキャッシュ`~/.bun/install/cache`はcwdに関わらず共有されるため、依存解決自体は別ルートでも間接的に助けられていたから）。
+正しいディレクトリ（cache/0.0.4）で`bun install --no-summary`を計測すると**0.2秒**（依存は既に解決済みのため、そもそも遅延要因ではない）。次に、`server.ts`を実際に読み、`await mcp.connect(...)`が`client.login(TOKEN)`より前に実行されることを再確認した上で、その手前で読み込まれる`discord.js`・`@modelcontextprotocol/sdk`等のモジュールを実際に`import`する所要時間を計測したところ、**1回目13.66秒・2回目0.64秒・3回目0.64秒**という劇的な差を確認した。これは前回記録した「Windows Defenderのリアルタイムスキャンが初回ファイルアクセス時に介入している」という未確定仮説と完全に整合する実測データであり、推測ではなく直接観測した事実。**対処法を更新**：単なる`bun install`では不十分（依存解決自体は問題ではないため）、実際に依存モジュールを`import`して初回アクセスのペナルティを毎セッション開始時に先払いする必要がある——上記「実行手順」に反映済み。Defenderの除外設定（`bun.exe`または`cache/claude-plugins-official/discord/`フォルダ）を追加すればこの初回ペナルティ自体をなくせる可能性があるが、まだユーザーに設定してもらっていない（提案済み、判断・実施待ち）。**「全部再インストール」は今回は不要と判断**——node_modules自体は壊れておらず、依存関係も正しく解決済みのため、再インストールしても初回アクセス遅延（ファイルシステム/AVスキャンの問題であり、ファイル内容の問題ではない）は解消しない。
 
 **2026-06-22夜、訂正：VS Code説は誤りだった。** `C:\Users\<ユーザー>\AppData\Roaming\Code\logs\<タイムスタンプ>\mcpGateway.log`がたまたま今夜のセッション開始と近い時刻（23:45頃）に存在したため、「このユーザーはClaude CodeをVS Code拡張機能経由で使っている」と推測し、`McpGatewayService`がVS Codeプロセス起動時に1回しか初期化されないことを根本原因として記録した。**しかしユーザーに直接確認したところ、Claude Codeは`git bash`から起動しており、VS Codeはこのとき起動していなかった（使っていない）と明確な回答があった**——ログのタイムスタンプ一致は単なる偶然で、無関係。**この一件の教訓**：ファイルシステム上の状況証拠（ログのタイムスタンプ一致など）だけで「このユーザーの環境はこうだ」と推測して断定的に記録しない。環境の前提（どのインターフェース経由でClaude Codeを使っているか）はユーザーに直接確認すること。VS Code関連の記述はすべて撤回——この問題の本体は依然「git bashのターミナルプロセス自体を完全に終了して新規に`claude`を起動する」（2026-06-21確定の元々の対処法）が正しい対処法のままで、まだ試されていない可能性が高い。
 
