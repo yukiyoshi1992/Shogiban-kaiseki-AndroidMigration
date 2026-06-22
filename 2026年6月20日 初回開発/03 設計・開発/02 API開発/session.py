@@ -20,6 +20,14 @@
 （かつこの2回目のリクエストが実機で断続的にタイムアウトする事象が確認された）。
 /calibration/photo 1回のリクエスト内で対局開始まで完了するよう統合したため、
 「写真は認識したが対局はまだ始めていない」という中間状態はもう存在しない。
+
+2026-06-22追記（UAT課題②）：手動タップ（4隅指定）の直後に限り、「グリッド線が
+正しく盤に重なっているか」を人間が目視確認する画面が復活した。これは前回削除した
+9x9目視確認（自動判定に置き換え済み）とは別物——盤面認識結果の確認ではなく、
+4隅タップ自体の精度（透視変換が合っているか）の確認。この確認待ちの間だけ、
+`pending_manual_matrix`に透視変換行列を一時保持する（state自体はidleのまま変えない
+——再タップで`/calibration/photo`を呼び直せば単に上書きされるだけで良いため、
+専用の状態遷移は不要と判断）。
 """
 
 from dataclasses import dataclass, field
@@ -40,6 +48,7 @@ class GameState(str, Enum):
 class GameSession:
     state: GameState = GameState.IDLE
     calib_matrix: "object" = None
+    pending_manual_matrix: "object" = None
     board: Optional["shogi.Board"] = None
     moves_usi: list = field(default_factory=list)
     kif_path: Optional[Path] = None
@@ -48,6 +57,7 @@ class GameSession:
     def reset(self):
         self.state = GameState.IDLE
         self.calib_matrix = None
+        self.pending_manual_matrix = None
         self.board = None
         self.moves_usi = []
         self.kif_path = None

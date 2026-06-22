@@ -3,17 +3,25 @@
 `/health` と `/photo`（写真を受け取って保存するだけの通信確認用ダミー）は初期動作確認で使った
 ものをそのまま残してある。本番の対局フローは `/calibration/photo` 以降の新エンドポイント。
 
-エンドポイント構成はアーキテクチャ検討.md 3節の案に対応:
-  POST /calibration/photo   キャリブレーション写真+盤の4隅座標 → 9x9認識結果（人間確認用）
-  POST /calibration/confirm 確認OK → 対局開始（盤=将棋の初期配置、KIF新規作成）
-  POST /move                1手分の写真 → classify_frameで判定 → KIF追記+読み上げテキスト
-  POST /game/end             終局通知 → KIF確定、状態をidleに戻す
-  GET  /games                KIF一覧（開始日付で絞り込み可）
-  GET  /games/{game_id}      指定KIFの内容取得
+エンドポイント構成はアーキテクチャ検討.md 3節の案がベースだが、2026-06-22に
+/calibration/confirmは廃止・統合済み（旧人間確認UIの残骸だったため）。代わりに
+手動タップ時専用の/calibration/confirm_gridを追加（UAT課題②、下記参照）:
+  POST /calibration/photo        キャリブレーション写真（自動検出 or 4隅タップ）→ 認識結果。
+                                  自動検出が初期配置と一致、または4隅タップ自体は
+                                  そのリクエスト内で対局開始まで完了する。4隅タップの場合のみ
+                                  対局開始の前に、グリッド線重畫画像（緑線）を返し人間の
+                                  目視確認を挟む（status="pending_confirm"）。
+  POST /calibration/confirm_grid 上記の目視確認でOKだった場合のみ呼ぶ→対局開始。
+  POST /move                     1手分の写真 → classify_frameで判定 → KIF追記+読み上げテキスト
+  POST /game/end                 終局通知 → KIF確定、状態をidleに戻す
+  POST /game/abort                対局中止 → 状態を無条件でidleに戻す（テスト用、UAT課題①）
+  GET  /games                    KIF一覧（開始日付で絞り込み可）
+  GET  /games/{game_id}          指定KIFの内容取得
 
 盤面認識・指し手判定ロジックは recognition.py、対局状態は session.py のシングルトンに分離。
 """
 
+import base64
 import json
 import time
 from datetime import datetime
@@ -149,7 +157,29 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     t_predict = time.perf_counter()
     mismatches = recognition.compare_to_initial(recognized)
 
-    start_game = (points is not None) or (len(mismatches) == 0)
+    if points is not None:
+        # 2026-06-22、UAT課題②：手動タップは対局をすぐ開始せず、グリッド線オーバーレイ
+        # （前PJ save_grid_overlay同様の緑線）を人間が目視確認してからにする
+        # （4隅タップ自体の精度——透視変換が盤に正しく合っているか——の確認。
+        # 盤面認識結果の確認ではないので、自動検出側のmatches_initial判定とは独立）。
+        session.pending_manual_matrix = matrix
+        overlay_b64 = base64.b64encode(recognition.grid_overlay_jpeg_bytes(img, matrix)).decode("ascii")
+        t_end = time.perf_counter()
+        _log(f"[timing] body_read={t_body_read-t_start:.2f}s decode={t_decode-t_body_read:.2f}s "
+             f"save={t_save-t_decode:.2f}s calib={t_calib-t_save:.2f}s predict={t_predict-t_calib:.2f}s "
+             f"total={t_end-t_start:.2f}s -> pending_confirm "
+             f"(responding now, mismatch_count={len(mismatches)})")
+        return {
+            "status": "pending_confirm",
+            "grid_overlay_jpeg_base64": overlay_b64,
+            "recognized": recognized,
+            "matches_initial": len(mismatches) == 0,
+            "mismatch_count": len(mismatches),
+        }
+
+    # 自動検出：初期配置と完全一致した場合のみその場で対局開始。不一致なら人間の
+    # 手動タップへフォールバック（status="ready"のまま、idleに留まる）。
+    start_game = len(mismatches) == 0
     game_id = None
     if start_game:
         session.calib_matrix = matrix
@@ -173,6 +203,29 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
         "matches_initial": len(mismatches) == 0,
         "mismatch_count": len(mismatches),
     }
+
+
+@app.post("/calibration/confirm_grid")
+async def calibration_confirm_grid():
+    """手動タップ後のグリッド目視確認でOKだった場合に呼ぶ→対局開始（UAT課題②）。
+    NGの場合はこのエンドポイントを呼ばず、アプリ側はタップ画面に戻るだけでよい
+    （pending_manual_matrixは次の/calibration/photoで上書きされるか、対局中止/再起動で
+    クリアされる）。
+    """
+    if session.pending_manual_matrix is None:
+        raise HTTPException(409, "no pending manual calibration to confirm")
+
+    matrix = session.pending_manual_matrix
+    session.pending_manual_matrix = None
+    session.calib_matrix = matrix
+    session.board = shogi.Board()
+    session.moves_usi = []
+    game_id = f"game_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    session.game_id = game_id
+    session.kif_path = RUNTIME_GAMES_DIR / f"{game_id}.kif"
+    session.kif_path.write_text("手数----指手---------消費時間--\n", encoding="utf-8")
+    session.state = GameState.PLAYING
+    return {"status": "playing", "game_id": game_id}
 
 
 @app.post("/move")
@@ -232,6 +285,17 @@ async def game_end():
     }
     session.reset()
     return result
+
+
+@app.post("/game/abort")
+async def game_abort():
+    """対局中止（2026-06-22、UAT課題①）。/game/endと違い対局開始前提の状態チェックをせず、
+    現在どの状態にあっても無条件でidleに戻す——テスト中に「やり直したい」場面で確実に
+    使える強制リセットとして使うため（サーバが想定外の状態で固まった場合の回復手段にもなる）。
+    KIFファイルは削除せず、記録済みの手数まではそのまま残す。
+    """
+    session.reset()
+    return {"status": "idle"}
 
 
 @app.get("/games")

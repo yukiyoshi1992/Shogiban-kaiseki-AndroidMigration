@@ -70,17 +70,29 @@ _transform = transforms.Compose([
 
 
 def predict_board(model, warped, cell_px=CELL_PX, grid_size=GRID_SIZE):
-    labels = [[None] * grid_size for _ in range(grid_size)]
+    # 2026-06-22、UATで処理が遅いと指摘されたため高速化：前PJ由来の実装は81マスを
+    # 1枚ずつモデルに通していた（推論のたびにPython/PyTorchの呼び出しオーバーヘッドが
+    # 81回発生）。eval()モード（load_model内で設定済み）ではBatchNormが学習時の
+    # 移動平均統計を使い、Dropoutも無効化されるため、バッチサイズを変えても各マスの
+    # 推論結果はマス単位ですでに独立しており、1枚ずつ回しても81枚まとめて回しても
+    # 数値的に同じ結果になる。81マスを1回のバッチにまとめて1回のフォワードパスで
+    # 推論するよう変更（結果は変えず、実行方法だけ変更）。
+    tensors = []
     for row in range(grid_size):
         for col in range(grid_size):
             x1, y1 = col * cell_px, row * cell_px
             cell = warped[y1:y1 + cell_px, x1:x1 + cell_px]
             pil = Image.fromarray(cv2.cvtColor(cell, cv2.COLOR_BGR2RGB))
-            t = _transform(pil).unsqueeze(0)
-            with torch.no_grad():
-                out = model(t)
-                pred = out.max(1)[1]
-            labels[row][col] = ALL_LABELS[pred.item()]
+            tensors.append(_transform(pil))
+    batch = torch.stack(tensors)
+    with torch.no_grad():
+        out = model(batch)
+        preds = out.max(1)[1]
+
+    labels = [[None] * grid_size for _ in range(grid_size)]
+    for idx in range(grid_size * grid_size):
+        row, col = divmod(idx, grid_size)
+        labels[row][col] = ALL_LABELS[preds[idx].item()]
     return labels
 
 
@@ -117,6 +129,22 @@ def save_grid_overlay(img, M, out_path, grid_size=GRID_SIZE, cell_px=CELL_PX):
         cv2.line(vis, (i * cell_px, 0), (i * cell_px, side), (0, 200, 0), 2)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     cv2.imencode(".png", vis)[1].tofile(str(out_path))
+
+
+def grid_overlay_jpeg_bytes(img, M, grid_size=GRID_SIZE, cell_px=CELL_PX):
+    """save_grid_overlayと同じ緑グリッド重畫画像をファイルに保存せずJPEGバイト列として返す。
+    2026-06-22、UAT課題②：手動タップ後に「マスが正しく取れているか」を人間が目視確認する
+    画面用（前PJ同様の緑線オーバーレイ）。APIレスポンスに直接載せて返すための変種。
+    PNGだと約1.5MBになりレスポンスが重いため、JPEG（quality=85）で約7分の1に圧縮する
+    （緑線は太く塗っているため、JPEG圧縮による劣化があっても目視確認の用途には十分）。
+    """
+    warped = warp_board(img, M)
+    vis = warped.copy()
+    side = cell_px * grid_size
+    for i in range(grid_size + 1):
+        cv2.line(vis, (0, i * cell_px), (side, i * cell_px), (0, 200, 0), 2)
+        cv2.line(vis, (i * cell_px, 0), (i * cell_px, side), (0, 200, 0), 2)
+    return cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
 
 
 # ===== 赤丸キャリブレーション（自動検出。前PJ run_realtime.py から移植） =====
@@ -341,6 +369,13 @@ FILE_JA = ['', '１', '２', '３', '４', '５', '６', '７', '８', '９']
 RANK_JA = ['', '一', '二', '三', '四', '五', '六', '七', '八', '九']
 PIECE_JA = {'p': '歩', 'l': '香', 'n': '桂', 's': '銀', 'g': '金', 'b': '角', 'r': '飛', 'k': '玉',
             '+p': 'と', '+l': '成香', '+n': '成桂', '+s': '成銀', '+b': '馬', '+r': '龍'}
+# 2026-06-22、UAT課題④：TTS読み上げ用のひらがな読み（KIF表記用のPIECE_JAとは別管理）。
+# 「歩」をAndroidのTTSエンジンに渡すと「ぽ」と読み上げる事象が報告されたため、
+# 漢字をそのまま読み上げに渡すのをやめ、将棋用語として確定しているひらがな読みを使う。
+PIECE_YOMI = {'p': 'ふ', 'l': 'きょう', 'n': 'けい', 's': 'ぎん', 'g': 'きん', 'b': 'かく',
+              'r': 'ひ', 'k': 'ぎょく',
+              '+p': 'と', '+l': 'なりきょう', '+n': 'なりけい', '+s': 'なりぎん',
+              '+b': 'うま', '+r': 'りゅう'}
 _FILE_MAP = {'a': 1, 'b': 2, 'c': 3, 'd': 4, 'e': 5, 'f': 6, 'g': 7, 'h': 8, 'i': 9}
 
 
@@ -354,16 +389,21 @@ def move_to_text(board, move):
     """
     dst_ja = _square_ja(shogi.SQUARE_NAMES[move.to_square])
     if move.drop_piece_type:
-        pj = PIECE_JA.get(shogi.PIECE_SYMBOLS[move.drop_piece_type], '?')
-        text = f"{dst_ja}{pj}打"
-        return text, text
+        symbol = shogi.PIECE_SYMBOLS[move.drop_piece_type]
+        pj = PIECE_JA.get(symbol, '?')
+        py = PIECE_YOMI.get(symbol, pj)
+        kif_text = f"{dst_ja}{pj}打"
+        speech_text = f"{dst_ja}{py}打"
+        return kif_text, speech_text
 
     src = shogi.SQUARE_NAMES[move.from_square]
     pc = board.piece_at(move.from_square)
-    pj = PIECE_JA.get(shogi.PIECE_SYMBOLS[pc.piece_type] if pc else '?', '?')
+    symbol = shogi.PIECE_SYMBOLS[pc.piece_type] if pc else '?'
+    pj = PIECE_JA.get(symbol, '?')
+    py = PIECE_YOMI.get(symbol, pj)
     pr = "成" if move.promotion else ""
-    speech_text = f"{dst_ja}{pj}{pr}"
-    kif_text = f"{speech_text}({src[0]}{_FILE_MAP[src[1]]})"
+    kif_text = f"{dst_ja}{pj}{pr}({src[0]}{_FILE_MAP[src[1]]})"
+    speech_text = f"{dst_ja}{py}{pr}"
     return kif_text, speech_text
 
 

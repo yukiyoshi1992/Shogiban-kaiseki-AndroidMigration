@@ -15,10 +15,16 @@ interface ShogiApiService {
         @Part("points") points: RequestBody? = null
     ): Response<CalibrationPhotoResponse>
 
+    @POST("calibration/confirm_grid")
+    suspend fun calibrationConfirmGrid(): Response<GameEndResponse>
+
     @Multipart
     @POST("move")
     suspend fun move(@Part file: MultipartBody.Part): Response<MoveResponse>
 
     @POST("game/end")
     suspend fun gameEnd(): Response<GameEndResponse>
+
+    @POST("game/abort")
+    suspend fun gameAbort(): Response<GameEndResponse>
 }

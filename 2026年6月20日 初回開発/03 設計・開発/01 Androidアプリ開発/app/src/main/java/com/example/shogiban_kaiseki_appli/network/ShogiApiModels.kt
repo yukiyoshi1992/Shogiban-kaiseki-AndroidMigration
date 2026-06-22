@@ -7,7 +7,8 @@ package com.example.shogiban_kaiseki_appli.network
  * 個別マス補正はしない方針のため、不一致の詳細は件数のみ（mismatch_count）で十分。
  * statusが"playing"なら対局開始済み（game_idが入る）、"ready"なら自動検出が不一致で
  * 対局未開始（2026-06-22、旧/calibration/confirmをこのレスポンスに統合したため、
- * 対局開始の有無もここで分かる）。
+ * 対局開始の有無もここで分かる）。statusが"pending_confirm"なら手動タップ後の
+ * グリッド確認待ち（grid_overlay_jpeg_base64に緑線オーバーレイ画像が入る、UAT課題②）。
  */
 data class CalibrationPhotoResponse(
     val status: String? = null,
@@ -15,7 +16,8 @@ data class CalibrationPhotoResponse(
     val recognized: List<List<String>>? = null,
     val matches_initial: Boolean? = null,
     val mismatch_count: Int? = null,
-    val reason: String? = null
+    val reason: String? = null,
+    val grid_overlay_jpeg_base64: String? = null
 )
 
 /**

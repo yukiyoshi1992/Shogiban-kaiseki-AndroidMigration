@@ -63,7 +63,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.math.roundToInt
 
-private enum class CalibPhase { CAMERA, AUTO_SUBMITTING, TAPPING, SUBMITTING, ERROR }
+private enum class CalibPhase { CAMERA, AUTO_SUBMITTING, TAPPING, SUBMITTING, GRID_CONFIRM, ERROR }
 
 /** decodeForDisplay()が返す元画像（撮影フルサイズ）のピクセル寸法。タップ座標をこの基準に変換して送信する。 */
 private data class PixelSize(val width: Int, val height: Int)
@@ -95,6 +95,7 @@ fun CalibrationScreen(
     var tapPoints by remember { mutableStateOf(listOf<Offset>()) }
     var tappingHint by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf("") }
+    var gridOverlayBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
     fun resetToCamera() {
         phase = CalibPhase.CAMERA
@@ -121,19 +122,36 @@ fun CalibrationScreen(
                     tappingHint = "赤丸を検出できませんでした。盤の四隅をタップしてください"
                     phase = CalibPhase.TAPPING
                 },
+                onPendingConfirm = { /* 自動検出モードでは発生しない */ },
                 onError = { msg -> errorMessage = msg; phase = CalibPhase.ERROR }
             )
         }
     }
 
-    // 手動4隅タップモード：人間が直接指定した結果は前PJの方針通り無条件に採用する
-    // （初期配置との不一致があっても、人間が見て決めた4隅を信頼し、再度のやり直しは求めない）。
+    // 手動4隅タップモード：2026-06-22、UAT課題②により変更。タップ直後にすぐ対局開始するのではなく、
+    // サーバが返すグリッド線オーバーレイ（前PJ同様の緑線）を人間が目視確認する画面を挟む
+    // （4隅タップ自体の精度——透視変換が盤に正しく合っているか——の確認。盤面認識結果の
+    // 確認ではないので、認識の不一致（mismatch）の有無に関わらず常にこの確認画面を経由する）。
     fun handleManualResult(file: File, points: List<List<Double>>) {
         coroutineScope.launch {
             submitCalibration(file, points,
                 onMatch = { onCalibrated() },
                 onMismatch = { onCalibrated() },
                 onCalibrationFailed = { errorMessage = "サーバ側でキャリブレーションに失敗しました"; phase = CalibPhase.ERROR },
+                onPendingConfirm = { base64 ->
+                    val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
+                    gridOverlayBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    phase = CalibPhase.GRID_CONFIRM
+                },
+                onError = { msg -> errorMessage = msg; phase = CalibPhase.ERROR }
+            )
+        }
+    }
+
+    fun handleGridConfirmOk() {
+        coroutineScope.launch {
+            confirmGrid(
+                onSuccess = { onCalibrated() },
                 onError = { msg -> errorMessage = msg; phase = CalibPhase.ERROR }
             )
         }
@@ -183,6 +201,16 @@ fun CalibrationScreen(
         CalibPhase.SUBMITTING -> Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("サーバで判定中...")
         }
+
+        CalibPhase.GRID_CONFIRM -> GridConfirmStep(
+            modifier = modifier,
+            overlayBitmap = gridOverlayBitmap,
+            onOk = { handleGridConfirmOk() },
+            onRetry = {
+                tapPoints = emptyList()
+                phase = CalibPhase.TAPPING
+            }
+        )
 
         CalibPhase.ERROR -> Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -512,7 +540,8 @@ private fun decodeForDisplay(file: File, maxWidthPx: Int): Pair<Bitmap, PixelSiz
 
 /**
  * pointsがnullなら自動（赤丸）検出モード、指定すればその4点座標で透視変換するモード。
- * サーバの判定結果に応じて3種類のコールバックのいずれかを呼ぶ。
+ * サーバの判定結果に応じて4種類のコールバックのいずれかを呼ぶ
+ * （2026-06-22、UAT課題②：手動タップはonPendingConfirm経由でグリッド確認画面に進む）。
  */
 private suspend fun submitCalibration(
     file: File,
@@ -520,6 +549,7 @@ private suspend fun submitCalibration(
     onMatch: () -> Unit,
     onMismatch: (Int) -> Unit,
     onCalibrationFailed: () -> Unit,
+    onPendingConfirm: (String) -> Unit,
     onError: (String) -> Unit
 ) {
     try {
@@ -531,6 +561,7 @@ private suspend fun submitCalibration(
         when {
             !response.isSuccessful || body == null -> onError("HTTP ${response.code()}")
             body.status == "calibration_failed" -> onCalibrationFailed()
+            body.status == "pending_confirm" -> onPendingConfirm(body.grid_overlay_jpeg_base64 ?: "")
             body.matches_initial == true -> onMatch()
             else -> onMismatch(body.mismatch_count ?: -1)
         }
@@ -538,5 +569,55 @@ private suspend fun submitCalibration(
         // 2026-06-21、タイムアウト原因調査用：アップロード完了までの時間と応答待ちの時間を
         // 画面のエラー表示に含める（Logcatを見られない状況でも切り分けられるようにするため）。
         onError("${e.message ?: "通信エラー"} [${com.example.shogiban_kaiseki_appli.network.NetworkTiming.lastSummary}]")
+    }
+}
+
+private suspend fun confirmGrid(onSuccess: () -> Unit, onError: (String) -> Unit) {
+    try {
+        val response = RetrofitClient.shogiApiService.calibrationConfirmGrid()
+        if (response.isSuccessful) onSuccess() else onError("HTTP ${response.code()}")
+    } catch (e: Exception) {
+        onError(e.message ?: "通信エラー")
+    }
+}
+
+/**
+ * UAT課題②：手動タップ後、サーバが返した緑グリッド線オーバーレイ画像を表示し、
+ * 4隅タップの精度（透視変換が盤に正しく合っているか）を人間が目視確認する画面。
+ * OKなら対局開始、NGなら盤の四隅タップへ戻る（同じ撮影写真への再タップ、撮り直しは不要）。
+ */
+@Composable
+private fun GridConfirmStep(
+    modifier: Modifier,
+    overlayBitmap: Bitmap?,
+    onOk: () -> Unit,
+    onRetry: () -> Unit
+) {
+    Column(
+        modifier = modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "緑の線が盤のマスに正しく重なっているか確認してください",
+            modifier = Modifier.padding(12.dp)
+        )
+        if (overlayBitmap != null) {
+            Image(
+                bitmap = overlayBitmap.asImageBitmap(),
+                contentDescription = "キャリブレーション確認用グリッド",
+                modifier = Modifier.weight(1f)
+            )
+        } else {
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                Text("画像を読み込めませんでした")
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            Button(onClick = onRetry) { Text("やり直す") }
+            Button(onClick = onOk) { Text("OK（対局開始）") }
+        }
     }
 }
