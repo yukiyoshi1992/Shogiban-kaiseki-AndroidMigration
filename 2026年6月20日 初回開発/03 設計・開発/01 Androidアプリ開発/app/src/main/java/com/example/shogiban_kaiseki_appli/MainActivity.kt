@@ -39,7 +39,6 @@ import java.util.Locale
 class MainActivity : ComponentActivity() {
     private var tts: TextToSpeech? = null
     private var shutterTrigger: (() -> Unit)? = null
-    private var lastShutterKeyAtMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -83,14 +82,6 @@ class MainActivity : ComponentActivity() {
         if (event.action == KeyEvent.ACTION_DOWN &&
             (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP || event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
         ) {
-            // 6回目UAT課題①：Bluetoothシャッター接続時、AVRCPの絶対音量ネゴシエーションが
-            // 音量キーイベントを短時間に連射することがあると判明（サーバログで無関係な撮影が
-            // 連続POSTされていたことから確定）。人間が物理ボタンを押す間隔（連射撮影でも数百ms
-            // 以上）よりずっと短い間隔での再発火は機器都合の誤発火とみなし、無視する。
-            val now = System.currentTimeMillis()
-            if (now - lastShutterKeyAtMs < SHUTTER_KEY_DEBOUNCE_MS) {
-                return true
-            }
             val trigger = shutterTrigger
             // 音量キーが反応しないという報告の原因調査用。イベント自体が届いているか、
             // シャッターが登録済みかをトーストで可視化する（2026-06-21、原因切り分け用の一時的な診断）。
@@ -100,7 +91,6 @@ class MainActivity : ComponentActivity() {
                 Toast.LENGTH_SHORT
             ).show()
             if (trigger != null) {
-                lastShutterKeyAtMs = now
                 trigger.invoke()
                 return true
             }
@@ -111,10 +101,6 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         tts?.shutdown()
         super.onDestroy()
-    }
-
-    private companion object {
-        const val SHUTTER_KEY_DEBOUNCE_MS = 500L
     }
 }
 
