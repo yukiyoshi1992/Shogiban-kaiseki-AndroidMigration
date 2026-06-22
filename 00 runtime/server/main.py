@@ -262,10 +262,16 @@ async def calibration_confirm_grid():
     session.calib_matrix = matrix
     session.board = shogi.Board()
     session.moves_usi = []
-    game_id = datetime.now().strftime("%Y%m%d_%H-%M")
+    now = datetime.now()
+    session.start_time = now
+    session.last_move_time = now
+    game_id = now.strftime("%Y%m%d_%H-%M")
     session.game_id = game_id
     session.kif_path = RUNTIME_GAMES_DIR / f"{KIF_PREFIX_PLAYING}{game_id}.kif"
-    session.kif_path.write_text("手数----指手---------消費時間--\n", encoding="utf-8")
+    session.kif_path.write_text(
+        f"開始日時：{now.strftime('%Y/%m/%d %H:%M:%S')}\n手数----指手---------消費時間--\n",
+        encoding="utf-8",
+    )
     session.state = GameState.PLAYING
     return {"status": "playing", "game_id": game_id}
 
@@ -298,6 +304,13 @@ async def post_move(file: UploadFile):
 
     if status == "move":
         speech_texts = []
+        now = datetime.now()
+        # 1リクエストで複数手（depth2）が確定する場合があるので、消費時間は
+        # まとめてこのリクエスト分として全手に同じ値を記録する（厳密さは不要な要件のため）
+        this_move_seconds = (now - session.last_move_time).total_seconds()
+        total_seconds = (now - session.start_time).total_seconds()
+        time_field = recognition.kif_time_field(this_move_seconds, total_seconds)
+        session.last_move_time = now
         for usi in payload:
             move = shogi.Move.from_usi(usi)
             kif_text, speech_text = recognition.move_to_text(session.board, move)
@@ -305,7 +318,7 @@ async def post_move(file: UploadFile):
             session.moves_usi.append(usi)
             move_number = len(session.moves_usi)
             with open(session.kif_path, "a", encoding="utf-8") as f:
-                f.write(f"{move_number:4d} {kif_text} (00:00/00:00:00)\n")
+                f.write(f"{move_number:4d} {kif_text} {time_field}\n")
             speech_texts.append(speech_text)
         return {
             "status": "move",

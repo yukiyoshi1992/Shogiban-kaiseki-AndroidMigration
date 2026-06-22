@@ -483,21 +483,16 @@ def move_to_text(board, move):
     return kif_text, speech_text
 
 
-def save_kif(moves_usi, out_path):
-    """moves_usi全体から完全なKIFファイルを書き出す（終局時の確定保存用）"""
-    lines = ["手数----指手---------消費時間--"]
-    board = shogi.Board()
-    for i, usi in enumerate(moves_usi):
-        try:
-            b = shogi.Board()
-            b.set_sfen(board.sfen())
-            b.push_usi(usi)
-            move = list(b.move_stack)[-1]
-            kif_text, _ = move_to_text(board, move)
-            lines.append(f"{i + 1:4d} {kif_text} (00:00/00:00:00)")
-            board.push(move)
-        except Exception as e:
-            lines.append(f"{i + 1:4d} (ERROR: {e})")
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+def kif_time_field(this_move_seconds, total_seconds):
+    """KIFの消費時間欄"(MM:SS/HH:MM:SS)"を作る（5回目UAT課題②）。
+
+    厳密な計測ではなく、サーバが各リクエストを受け取った時刻同士の差分から
+    出す「おおよそ」の値（要件通り、厳密でなくてよい）。負値・異常値が来ても
+    クラッシュしないよう0に丸める。
+    """
+    this_move_seconds = max(0, int(this_move_seconds))
+    total_seconds = max(0, int(total_seconds))
+    m, s = divmod(this_move_seconds, 60)
+    h, rem = divmod(total_seconds, 3600)
+    mm, ss = divmod(rem, 60)
+    return f"({m:02d}:{s:02d}/{h:02d}:{mm:02d}:{ss:02d})"
