@@ -44,6 +44,7 @@ import androidx.core.content.ContextCompat
 import com.example.shogiban_kaiseki_appli.camera.rememberShutterSound
 import com.example.shogiban_kaiseki_appli.network.RetrofitClient
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.MediaType.Companion.toMediaType
@@ -63,14 +64,19 @@ private sealed class MoveResult {
     // 2026-06-22、UAT報告（撮影すると409が出る）の原因調査で追加：上記とは区別する。
     // サーバに届く前/応答が返る前に失敗したケース（タイムアウト・接続不可・HTTPエラー等）。
     // これは「認識した結果がエラーだった」のではなく「認識できたかどうかすら分からない」ので、
-    // 前PJの自動中止方針（認識エラーで続行不能→中止）の対象外——対局を中止せず、エラー表示の
-    // みでもう一度シャッターを押し直せるようにする。これを区別せずRecognitionErrorと同様に
-    // 自動中止していたのが今回の不具合の真因：一時的な通信不調（WiFi切れ等）で/moveが失敗すると
-    // 即座に対局を自動中止しに行くが、その「中止」自体も通信（/game/abort）なので、ネットワークが
-    // まだ不調だとそれも届かず、クライアントだけが対局を終えた扱いになりサーバはplayingのまま
-    // 残ってしまい、その後の撮影が全部409 Conflictになっていた。
+    // 区別せずRecognitionErrorと同様に即座に自動中止していたのが今回の不具合の真因：その
+    // 「中止」自体も通信（/game/abort）なので、ネットワークがまだ不調だとそれも届かず、
+    // クライアントだけが対局を終えた扱いになりサーバはplayingのまま残ってしまい、その後の
+    // 撮影が全部409 Conflictになっていた。
+    // 2026-06-22、ユーザー指摘により再修正：通信エラー発生時点で対局が既に進んでいる
+    // （駒が動いている）可能性があるため、即座に諦めず同じ写真で数回バックグラウンド再試行する
+    // （processFile参照）。それでも届かない場合のみ「記録不能」と判断し対局を自動中止する。
     data class NetworkError(val message: String) : MoveResult()
 }
+
+/** 通信エラー時の再試行回数・間隔。WiFiの一時的な切断を乗り切れる程度に短く設定。 */
+private const val NETWORK_RETRY_MAX = 3
+private const val NETWORK_RETRY_DELAY_MS = 1500L
 
 /**
  * 対局画面：カメラプレビュー常時表示、シャッター（オンスクリーンボタン or Bluetoothシャッター=
@@ -153,23 +159,37 @@ fun PlayScreen(
     //
     // 2026-06-22、上記の自動中止後に実機で再現した不具合への対応：自動中止はサーバが実際に
     // classify_frameを動かして"error"を返した場合（MoveResult.RecognitionError）のみに限定し、
-    // 単なる通信エラー（タイムアウト・接続不可・409等、MoveResult.NetworkError）では中止しない
-    // ように区別した。原因：通信が不調な時に/moveが失敗すると、当初は区別なく即座に対局を
-    // 自動中止しに行っていたが、その「中止」自体も通信（/game/abort）なので、ネットワークが
-    // まだ不調だとそれも届かない。するとクライアントは（abortGameがonGameEndedを無条件で呼ぶ
-    // ため）対局を終えた扱いになり画面が戻るが、サーバ側のセッションはplayingのまま残ってしまい、
-    // 以後の撮影が全部409 Conflictになる、という実機報告と一致する不具合があった。
+    // 単なる通信エラー（タイムアウト・接続不可・409等、MoveResult.NetworkError）では区別する。
+    // 原因：通信が不調な時に/moveが失敗すると、当初は区別なく即座に対局を自動中止しに行って
+    // いたが、その「中止」自体も通信（/game/abort）なので、ネットワークがまだ不調だとそれも
+    // 届かない。するとクライアントは（abortGameがonGameEndedを無条件で呼ぶため）対局を終えた
+    // 扱いになり画面が戻るが、サーバ側のセッションはplayingのまま残ってしまい、以後の撮影が
+    // 全部409 Conflictになる、という実機報告と一致する不具合があった。
+    //
+    // 2026-06-22、ユーザー指摘により再修正：通信エラーを検知した時点では対局がどこまで進んだか
+    // 不明（駒が動いた可能性がある）ため、単に「もう一度シャッターを押してください」と促すだけ
+    // では1手取りこぼす恐れがある。同じ写真（撮り直し不要）で数回バックグラウンド再試行し、
+    // それでも届かない場合のみ「記録不能」と判断して対局を自動中止する（RecognitionErrorと
+    // 同様にエラー音＋ポップアップで明示——通信エラーで終わったことに気づけないと困るため）。
     suspend fun processFile(file: File): Boolean {
         statusMessage = if (pendingCount > 0) {
             "処理中...（あと${pendingCount}件待ち）"
         } else {
             "処理中..."
         }
-        when (val result = sendMove(file)) {
+        var result = sendMove(file)
+        var retryCount = 0
+        while (result is MoveResult.NetworkError && retryCount < NETWORK_RETRY_MAX) {
+            retryCount++
+            statusMessage = "通信エラー、再試行中...(${retryCount}/${NETWORK_RETRY_MAX})"
+            delay(NETWORK_RETRY_DELAY_MS)
+            result = sendMove(file)
+        }
+        when (val finalResult = result) {
             is MoveResult.Move -> {
-                moveCount = result.moveCount
-                statusMessage = "${result.moveCount}手目: ${result.speechText}"
-                if (ttsEnabled) tts?.speak(result.speechText, TextToSpeech.QUEUE_ADD, null, null)
+                moveCount = finalResult.moveCount
+                statusMessage = "${finalResult.moveCount}手目: ${finalResult.speechText}"
+                if (ttsEnabled) tts?.speak(finalResult.speechText, TextToSpeech.QUEUE_ADD, null, null)
                 return false
             }
             is MoveResult.NoChange -> {
@@ -178,19 +198,21 @@ fun PlayScreen(
             }
             is MoveResult.RecognitionError -> {
                 playErrorTone()
-                val recordedCount = result.moveCount ?: moveCount
-                val reasonMsg = "認識エラーのため対局を中止しました（${recordedCount}手目まで記録）\n詳細: ${result.message}"
+                val recordedCount = finalResult.moveCount ?: moveCount
+                val reasonMsg = "認識エラーのため対局を中止しました（${recordedCount}手目まで記録）\n詳細: ${finalResult.message}"
                 statusMessage = reasonMsg
                 Toast.makeText(context, reasonMsg, Toast.LENGTH_LONG).show()
                 abortGame(onGameEnded)
                 return true
             }
             is MoveResult.NetworkError -> {
-                // 対局は中止しない（上記MoveResult.NetworkErrorのコメント参照）。
-                // 通信が復旧してから改めてシャッターを押し直せばよい。
+                // 再試行しても届かなかった＝記録不能。RecognitionErrorと同様に対局を自動中止する。
                 playErrorTone()
-                statusMessage = "通信エラー: ${result.message}（対局は継続中です。もう一度シャッターを押してください）"
-                return false
+                val reasonMsg = "通信エラーのため対局を中止しました（${moveCount}手目まで記録）\n詳細: ${finalResult.message}"
+                statusMessage = reasonMsg
+                Toast.makeText(context, reasonMsg, Toast.LENGTH_LONG).show()
+                abortGame(onGameEnded)
+                return true
             }
         }
     }

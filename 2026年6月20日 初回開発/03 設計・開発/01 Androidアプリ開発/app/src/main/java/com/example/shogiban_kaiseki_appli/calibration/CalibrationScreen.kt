@@ -3,6 +3,7 @@ package com.example.shogiban_kaiseki_appli.calibration
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.widget.Toast
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -90,6 +91,7 @@ fun CalibrationScreen(
     registerShutterTrigger: (() -> Unit) -> Unit,
     onCalibrated: () -> Unit
 ) {
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
     var phase by remember { mutableStateOf(CalibPhase.CAMERA) }
@@ -107,6 +109,32 @@ fun CalibrationScreen(
         capturedFile = null
         capturedBitmap = null
         tapPoints = emptyList()
+    }
+
+    // 2026-06-22、UAT報告（撮影すると409が出る）対応：HTTP 409（「対局中なのでキャリブレーション
+    // 不可」）は、クライアントは新しい対局を始めようとしているのにサーバ側に前の対局のセッションが
+    // 残っている、というクライアント・サーバ間の食い違いを意味する（典型例：通信不調で対局が
+    // 自動中止された際、中止の通知自体もサーバに届かなかった場合）。ユーザー指摘の通り、
+    // 「リセットしてやり直す」ボタンを押させる方式だと、ボタンを押さずにアプリを強制終了した
+    // 場合など気づかれずに残り続ける恐れがあるため、409の場合は人間の操作を待たず自動的に
+    // /game/abortでサーバをリセットしてから撮影し直す（Toastで「自動でリセットした」ことだけ
+    // 知らせる）。409以外（タイムアウト等の本当の通信障害）は従来通りエラー画面で
+    // 「撮影からやり直す」ボタンを表示する。
+    fun handleError(msg: String, code: Int?) {
+        if (code == 409) {
+            coroutineScope.launch {
+                forceResetSession()
+                Toast.makeText(
+                    context,
+                    "サーバに前の対局の情報が残っていたため自動的にリセットしました。もう一度撮影してください",
+                    Toast.LENGTH_LONG
+                ).show()
+                resetToCamera()
+            }
+        } else {
+            errorMessage = msg
+            phase = CalibPhase.ERROR
+        }
     }
 
     // 自動検出（赤丸）モード：失敗・不一致いずれも人間の4隅タップにフォールバックする
@@ -135,7 +163,7 @@ fun CalibrationScreen(
                     gridOverlayBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                     phase = CalibPhase.GRID_CONFIRM
                 },
-                onError = { msg -> errorMessage = msg; phase = CalibPhase.ERROR }
+                onError = { msg, code -> handleError(msg, code) }
             )
         }
     }
@@ -155,7 +183,7 @@ fun CalibrationScreen(
                     gridOverlayBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                     phase = CalibPhase.GRID_CONFIRM
                 },
-                onError = { msg -> errorMessage = msg; phase = CalibPhase.ERROR }
+                onError = { msg, code -> handleError(msg, code) }
             )
         }
     }
@@ -164,7 +192,7 @@ fun CalibrationScreen(
         coroutineScope.launch {
             confirmGrid(
                 onSuccess = { onCalibrated() },
-                onError = { msg -> errorMessage = msg; phase = CalibPhase.ERROR }
+                onError = { msg, code -> handleError(msg, code) }
             )
         }
     }
@@ -228,25 +256,15 @@ fun CalibrationScreen(
             }
         )
 
+        // 2026-06-22、UAT報告（撮影すると409が出る）対応：409（対局中なのでキャリブレーション
+        // 不可＝クライアント・サーバ間の状態の食い違い）はhandleError()で人間の操作を待たず
+        // 自動的に/game/abortしてから撮影し直すため、このERROR画面には到達しない。ここに来るのは
+        // 409以外の本当の通信障害（タイムアウト等）のみ——その場合は同じ写真の再送では解決しない
+        // 可能性が高いので「撮影からやり直す」のみ表示する。
         CalibPhase.ERROR -> Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(text = "エラー: $errorMessage")
                 Button(onClick = { resetToCamera() }) { Text("撮影からやり直す") }
-                // 2026-06-22、UAT報告：撮影しても409 Conflictになり「どうしてよいかわからない」
-                // 事象への対応。原因はクライアント側のアプリ再起動等で画面がキャリブレーション
-                // （idle相当）に戻っていても、サーバ側のセッション（プロセス内シングルトン、
-                // アプリを再起動しても消えない）は前の対局がplayingのまま残ってしまうケースが
-                // ありうること——クライアントからは「サーバがidleかplayingか」を見分ける手段が
-                // これまでなく、その状態で復旧する手段がキャリブレーション画面側に無かった。
-                // /game/abortは元々「どの状態からでも無条件でidleに戻す」設計（初回UAT課題①）
-                // なので、ここから呼べるようにして復旧手段を用意する（実際に対局中の場合に
-                // 誤って押しても、対局中止ボタンを押したのと同じ効果なので害はない）。
-                Button(onClick = {
-                    coroutineScope.launch {
-                        forceResetSession()
-                        resetToCamera()
-                    }
-                }) { Text("サーバの状態をリセットしてやり直す") }
             }
         }
     }
@@ -581,7 +599,9 @@ private suspend fun submitCalibration(
     onMismatch: (Int) -> Unit,
     onCalibrationFailed: () -> Unit,
     onPendingConfirm: (String) -> Unit,
-    onError: (String) -> Unit
+    // 2026-06-22、UAT報告対応：HTTPステータスコードも渡す（409＝対局中の食い違いを区別して
+    // 自動復旧するため、呼び出し側のhandleError参照）。
+    onError: (String, Int?) -> Unit
 ) {
     try {
         val requestBody = file.asRequestBody("image/jpeg".toMediaType())
@@ -590,7 +610,7 @@ private suspend fun submitCalibration(
         val response = RetrofitClient.shogiApiService.calibrationPhoto(part, pointsBody)
         val body = response.body()
         when {
-            !response.isSuccessful || body == null -> onError("HTTP ${response.code()}")
+            !response.isSuccessful || body == null -> onError("HTTP ${response.code()}", response.code())
             body.status == "calibration_failed" -> onCalibrationFailed()
             body.status == "pending_confirm" -> onPendingConfirm(body.grid_overlay_jpeg_base64 ?: "")
             body.matches_initial == true -> onMatch()
@@ -599,16 +619,16 @@ private suspend fun submitCalibration(
     } catch (e: Exception) {
         // 2026-06-21、タイムアウト原因調査用：アップロード完了までの時間と応答待ちの時間を
         // 画面のエラー表示に含める（Logcatを見られない状況でも切り分けられるようにするため）。
-        onError("${e.message ?: "通信エラー"} [${com.example.shogiban_kaiseki_appli.network.NetworkTiming.lastSummary}]")
+        onError("${e.message ?: "通信エラー"} [${com.example.shogiban_kaiseki_appli.network.NetworkTiming.lastSummary}]", null)
     }
 }
 
-private suspend fun confirmGrid(onSuccess: () -> Unit, onError: (String) -> Unit) {
+private suspend fun confirmGrid(onSuccess: () -> Unit, onError: (String, Int?) -> Unit) {
     try {
         val response = RetrofitClient.shogiApiService.calibrationConfirmGrid()
-        if (response.isSuccessful) onSuccess() else onError("HTTP ${response.code()}")
+        if (response.isSuccessful) onSuccess() else onError("HTTP ${response.code()}", response.code())
     } catch (e: Exception) {
-        onError(e.message ?: "通信エラー")
+        onError(e.message ?: "通信エラー", null)
     }
 }
 
