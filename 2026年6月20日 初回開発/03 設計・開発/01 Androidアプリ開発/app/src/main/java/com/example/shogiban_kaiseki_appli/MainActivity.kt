@@ -28,6 +28,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.shogiban_kaiseki_appli.calibration.CalibrationScreen
 import com.example.shogiban_kaiseki_appli.gamelist.GameListScreen
