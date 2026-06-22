@@ -38,6 +38,17 @@
 対局画面遷移の時点）と`last_move_time`（直前の手が記録された時刻、なければ
 start_time）を追加した。厳密な計測ではなく、サーバが各リクエストを受け取った
 時刻同士の差分から「おおよそ」の消費時間を出す方針（要件通り、厳密な時間は不要）。
+
+2026-06-23追記（5回目UAT課題④、対局再開機能）：`/calibration/photo`は対局開始の
+可能性があるキャリブレーション結果を`pending_*`系フィールドに一時保持し、
+`/calibration/confirm_grid`で確定する（ユーザーがグリッド確認画面で「OK」または
+「このまま進める」を押した時点）。新規対局・対局再開のどちらでもこの流れは共通——
+`pending_board`に「確定したら使うBoard」（認識結果が一致していればそのまま、
+不一致でも人間が「進める」を選んだ場合は`recognition.label_grid_to_board()`で
+復元したBoard）を確定前から計算済みで持たせておくことで、confirm_grid側は
+分岐を持たず常に同じ処理で済む。対局再開の場合のみ`pending_resume_*`が埋まり、
+confirm_grid側はそれを見て「新規KIFを作る」か「既存KIFを再開する（ファイル名の
+状態表示を【対局中】に戻し、手番・指し手履歴・開始時刻を引き継ぐ）」かを分岐する。
 """
 
 from dataclasses import dataclass, field
@@ -60,6 +71,11 @@ class GameSession:
     state: GameState = GameState.IDLE
     calib_matrix: "object" = None
     pending_calib_matrix: "object" = None
+    pending_board: Optional["shogi.Board"] = None
+    pending_resume_kif_path: Optional[Path] = None
+    pending_resume_moves: list = field(default_factory=list)
+    pending_resume_start_time: Optional[datetime] = None
+    pending_resume_game_id: Optional[str] = None
     board: Optional["shogi.Board"] = None
     moves_usi: list = field(default_factory=list)
     kif_path: Optional[Path] = None
@@ -71,6 +87,11 @@ class GameSession:
         self.state = GameState.IDLE
         self.calib_matrix = None
         self.pending_calib_matrix = None
+        self.pending_board = None
+        self.pending_resume_kif_path = None
+        self.pending_resume_moves = []
+        self.pending_resume_start_time = None
+        self.pending_resume_game_id = None
         self.board = None
         self.moves_usi = []
         self.kif_path = None

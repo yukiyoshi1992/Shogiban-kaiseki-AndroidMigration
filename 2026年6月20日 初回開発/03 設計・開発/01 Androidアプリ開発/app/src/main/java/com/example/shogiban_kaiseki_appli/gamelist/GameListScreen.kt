@@ -49,14 +49,23 @@ import kotlinx.coroutines.launch
  * こちら側からインターネットへAPIを公開する必要があり、セキュリティ上望ましくないため
  * 採用しない。代わりに「棋譜をクリップボードにコピー→KENTOサイトを開いて貼り付け」という
  * 手動連携にする、との明確な指示を受けてクリップボードコピーボタンを追加した。
+ *
+ * 2026-06-23、5回目UAT課題④（対局再開機能）：終局していない棋譜（resumable=true）の
+ * 詳細表示に「対局再開」ボタンを追加。押すとonResumeGameでその対局idを呼び出し元
+ * （MainActivity）に伝え、キャリブレーション画面（対局再開モード）へ遷移する。
  */
 @Composable
-fun GameListScreen(modifier: Modifier = Modifier, onBack: () -> Unit) {
+fun GameListScreen(
+    modifier: Modifier = Modifier,
+    onBack: () -> Unit,
+    onResumeGame: (gameId: String) -> Unit
+) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
     var dateFilter by remember { mutableStateOf("") }
     var games by remember { mutableStateOf<List<GameSummary>>(emptyList()) }
+    var selectedGame by remember { mutableStateOf<GameSummary?>(null) }
     var selectedKif by remember { mutableStateOf<String?>(null) }
     var statusMessage by remember { mutableStateOf("") }
 
@@ -84,10 +93,10 @@ fun GameListScreen(modifier: Modifier = Modifier, onBack: () -> Unit) {
     // （AppScreen sealed class）を使っており、Androidの標準バックスタックに乗っていないため
     // 何もしていなかった——BackHandlerで明示的にこの画面用の「戻る」相当の処理を割り当てる。
     if (selectedKif != null) {
-        BackHandler { selectedKif = null }
+        BackHandler { selectedKif = null; selectedGame = null }
         Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
             Text(text = selectedKif ?: "", modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()))
-            Button(onClick = { selectedKif = null }, modifier = Modifier.fillMaxWidth()) { Text("一覧に戻る") }
+            Button(onClick = { selectedKif = null; selectedGame = null }, modifier = Modifier.fillMaxWidth()) { Text("一覧に戻る") }
             Button(onClick = {
                 val intent = Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"
@@ -104,6 +113,11 @@ fun GameListScreen(modifier: Modifier = Modifier, onBack: () -> Unit) {
                 clipboard.setPrimaryClip(ClipData.newPlainText("KIF", selectedKif))
                 Toast.makeText(context, "棋譜をクリップボードにコピーしました", Toast.LENGTH_SHORT).show()
             }, modifier = Modifier.fillMaxWidth()) { Text("コピー（分析Tool貼付用）") }
+            // 5回目UAT課題④：終局していない棋譜（resumable）のみ「対局再開」を表示。
+            val gameId = selectedGame?.id
+            if (selectedGame?.resumable == true && gameId != null) {
+                Button(onClick = { onResumeGame(gameId) }, modifier = Modifier.fillMaxWidth()) { Text("対局再開") }
+            }
         }
         return
     }
@@ -137,6 +151,7 @@ fun GameListScreen(modifier: Modifier = Modifier, onBack: () -> Unit) {
                                 try {
                                     val response = RetrofitClient.gameListApiService.getGame(id)
                                     selectedKif = response.body()?.kif ?: "(取得失敗)"
+                                    selectedGame = game
                                 } catch (e: Exception) {
                                     statusMessage = "取得失敗: ${e.message}"
                                 }

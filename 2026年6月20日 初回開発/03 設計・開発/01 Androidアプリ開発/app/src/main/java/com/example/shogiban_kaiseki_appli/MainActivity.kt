@@ -105,7 +105,10 @@ class MainActivity : ComponentActivity() {
 }
 
 private sealed class AppScreen {
-    object Calibration : AppScreen()
+    // 5回目UAT課題④（対局再開機能）：resumeGameIdを持たせ、棋譜一覧から「対局再開」で
+    // 入った場合にどの中断局を再開するかをCalibrationScreenまで伝える。通常の新規対局では
+    // null（デフォルト）。
+    data class Calibration(val resumeGameId: String? = null) : AppScreen()
     object Playing : AppScreen()
     // 2026-06-22、アプリ要件「②結果共有時」：対局を始める前（idle相当）から入れる、
     // 過去のKIF一覧・共有画面。対局中の機能ではないのでPlayingからは入れない。
@@ -119,9 +122,9 @@ private fun ShogiAppFlow(
     registerShutterTrigger: (() -> Unit) -> Unit,
     setKeepScreenOn: (Boolean) -> Unit
 ) {
-    var screen by remember { mutableStateOf<AppScreen>(AppScreen.Calibration) }
+    var screen by remember { mutableStateOf<AppScreen>(AppScreen.Calibration()) }
 
-    when (screen) {
+    when (val s = screen) {
         is AppScreen.Calibration -> {
             DisposableEffect(Unit) {
                 setKeepScreenOn(false)
@@ -133,6 +136,7 @@ private fun ShogiAppFlow(
                 CalibrationScreen(
                     modifier = Modifier.fillMaxSize(),
                     registerShutterTrigger = registerShutterTrigger,
+                    resumeGameId = s.resumeGameId,
                     onCalibrated = { screen = AppScreen.Playing }
                 )
                 Button(
@@ -150,7 +154,7 @@ private fun ShogiAppFlow(
                 modifier = modifier,
                 tts = tts,
                 registerShutterTrigger = registerShutterTrigger,
-                onGameEnded = { screen = AppScreen.Calibration }
+                onGameEnded = { screen = AppScreen.Calibration() }
             )
         }
         is AppScreen.GameList -> {
@@ -160,7 +164,10 @@ private fun ShogiAppFlow(
             }
             GameListScreen(
                 modifier = modifier,
-                onBack = { screen = AppScreen.Calibration }
+                onBack = { screen = AppScreen.Calibration() },
+                // 5回目UAT課題④：棋譜一覧で「対局再開」を押したら、その対局idを持って
+                // キャリブレーション画面に遷移する。
+                onResumeGame = { gameId -> screen = AppScreen.Calibration(resumeGameId = gameId) }
             )
         }
     }

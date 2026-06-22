@@ -84,11 +84,16 @@ private data class PixelSize(val width: Int, val height: Int)
  * 2026-06-22、2回目UAT課題③：自動検出成功時も「タップ精度（透視変換が合っているか）」の
  * 目視確認（緑グリッド線）を挟むよう変更（盤面認識結果の一致確認だけでは透視変換自体の
  * ズレを検出できないため、手動タップと同じ確認画面に統一）。
+ * 2026-06-23、5回目UAT課題④：`resumeGameId`を指定すると対局再開モードになり、比較対象が
+ * 初期配置ではなく中断局のKIFから再現した盤面になる。また同課題により、赤丸自動検出が
+ * 不一致でも即・手動タップへフォールバックせず、グリッド確認画面で「このまま進める／
+ * 手動タップで直す」を選べるように変更（駒の並べ間違いに気づけた実例があったため）。
  */
 @Composable
 fun CalibrationScreen(
     modifier: Modifier = Modifier,
     registerShutterTrigger: (() -> Unit) -> Unit,
+    resumeGameId: String? = null,
     onCalibrated: () -> Unit
 ) {
     val context = LocalContext.current
@@ -103,6 +108,10 @@ fun CalibrationScreen(
     var tappingHint by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf("") }
     var gridOverlayBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    // 5回目UAT課題④：自動検出の結果が不一致だった場合、GridConfirmStepを「OK/やり直す」
+    // （タップ精度確認）ではなく「このまま進める/手動タップで直す」（不一致の選択）表示にする。
+    var isMismatchChoice by remember { mutableStateOf(false) }
+    var pendingMismatchCount by remember { mutableStateOf(0) }
 
     fun resetToCamera() {
         phase = CalibPhase.CAMERA
@@ -137,30 +146,26 @@ fun CalibrationScreen(
         }
     }
 
-    // 自動検出（赤丸）モード：失敗・不一致いずれも人間の4隅タップにフォールバックする
+    // 自動検出（赤丸）モード：失敗のみ人間の4隅タップにフォールバックする
     // （前PJ run_realtime.py と同じ「エラーが出たら即・人間が直す」方針）。
-    // 2026-06-22、2回目UAT課題③により変更：自動検出が初期配置と一致した場合も、
-    // 手動タップと同じグリッド確認画面（onPendingConfirm）を経由するようになった
-    // （サーバが対局開始までその場で完了させていたのは、盤面認識結果の一致確認だけで、
-    // 4隅タップ自体の精度——透視変換が盤に正しく合っているか——は確認していなかったため）。
-    // onMatch/onMismatchはこの経路では呼ばれない想定（サーバは自動一致時は必ず
-    // pending_confirmを返す）が、念のため残しておく：onMatchはonCalibrated()を直接呼び、
-    // onMismatchは従来通り手動タップへフォールバックする。
+    // 2026-06-22、2回目UAT課題③：自動検出が比較対象と一致した場合も、手動タップと同じ
+    // グリッド確認画面を経由するようになった（盤面認識結果の一致確認だけでは、
+    // 4隅タップ自体の精度——透視変換が盤に正しく合っているか——は確認できないため）。
+    // 2026-06-23、5回目UAT課題④：不一致の場合も即・手動タップへフォールバックせず、
+    // グリッド確認画面で「このまま進める／手動タップで直す」を選べるようにした
+    // （isMismatchChoice=trueでGridConfirmStepの表示を切り替える）。
     fun handleAutoResult(file: File) {
         coroutineScope.launch {
-            submitCalibration(file, points = null,
-                onMatch = { onCalibrated() },
-                onMismatch = { count ->
-                    tappingHint = "自動認識が初期配置と${count}箇所異なりました。盤の四隅をタップしてください"
-                    phase = CalibPhase.TAPPING
-                },
+            submitCalibration(file, points = null, resumeGameId = resumeGameId,
                 onCalibrationFailed = {
                     tappingHint = "赤丸を検出できませんでした。盤の四隅をタップしてください"
                     phase = CalibPhase.TAPPING
                 },
-                onPendingConfirm = { base64 ->
+                onPendingConfirm = { base64, matchesTarget, mismatchCount ->
                     val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
                     gridOverlayBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    isMismatchChoice = !matchesTarget
+                    pendingMismatchCount = mismatchCount
                     phase = CalibPhase.GRID_CONFIRM
                 },
                 onError = { msg, code -> handleError(msg, code) }
@@ -170,17 +175,17 @@ fun CalibrationScreen(
 
     // 手動4隅タップモード：2026-06-22、UAT課題②により変更。タップ直後にすぐ対局開始するのではなく、
     // サーバが返すグリッド線オーバーレイ（前PJ同様の緑線）を人間が目視確認する画面を挟む
-    // （4隅タップ自体の精度——透視変換が盤に正しく合っているか——の確認。盤面認識結果の
-    // 確認ではないので、認識の不一致（mismatch）の有無に関わらず常にこの確認画面を経由する）。
+    // （4隅タップ自体の精度——透視変換が盤に正しく合っているか——の確認。手動タップは
+    // 前PJ方針通り無条件採用のため、不一致の有無に関わらずisMismatchChoiceは立てない
+    // ——常に従来通りOK/やり直すの2択）。
     fun handleManualResult(file: File, points: List<List<Double>>) {
         coroutineScope.launch {
-            submitCalibration(file, points,
-                onMatch = { onCalibrated() },
-                onMismatch = { onCalibrated() },
+            submitCalibration(file, points, resumeGameId = resumeGameId,
                 onCalibrationFailed = { errorMessage = "サーバ側でキャリブレーションに失敗しました"; phase = CalibPhase.ERROR },
-                onPendingConfirm = { base64 ->
+                onPendingConfirm = { base64, _, _ ->
                     val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
                     gridOverlayBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    isMismatchChoice = false
                     phase = CalibPhase.GRID_CONFIRM
                 },
                 onError = { msg, code -> handleError(msg, code) }
@@ -203,6 +208,12 @@ fun CalibrationScreen(
             imageCapture = imageCapture,
             onImageCaptureReady = { imageCapture = it },
             registerShutterTrigger = registerShutterTrigger,
+            // 5回目UAT課題④：対局再開時は「初期配置に並べる」ではなく「棋譜通りに並べる」よう促す。
+            hint = if (resumeGameId != null) {
+                "中断時点の棋譜通りに盤面を並べて撮影してください（音量キーでも撮影できます）"
+            } else {
+                "盤全体が入るように撮影してください（音量キーでも撮影できます）"
+            },
             onCaptured = { file ->
                 val (bitmap, size) = decodeForDisplay(file, maxWidthPx = 1600)
                 capturedFile = file
@@ -245,13 +256,21 @@ fun CalibrationScreen(
         CalibPhase.GRID_CONFIRM -> GridConfirmStep(
             modifier = modifier,
             overlayBitmap = gridOverlayBitmap,
+            isMismatchChoice = isMismatchChoice,
+            mismatchCount = pendingMismatchCount,
             onOk = { handleGridConfirmOk() },
             onRetry = {
                 // 2026-06-22、2回目UAT課題③：自動検出成功後のグリッド確認でNGだった場合も
                 // ここを経由する（自動検出時はそもそも盤の四隅をタップしていないので、
                 // 同じ撮影済み写真に対して初めて手動タップを行うことになる）。
+                // 5回目UAT課題④：不一致選択（isMismatchChoice）で「手動タップで直す」を
+                // 押した場合も同じ処理（同じ撮影済み写真への手動タップ、撮り直し不要）。
                 tapPoints = emptyList()
-                tappingHint = "グリッドが盤に正しく重なっていませんでした。盤の四隅をタップしてください"
+                tappingHint = if (isMismatchChoice) {
+                    "盤の四隅をタップしてください"
+                } else {
+                    "グリッドが盤に正しく重なっていませんでした。盤の四隅をタップしてください"
+                }
                 phase = CalibPhase.TAPPING
             }
         )
@@ -276,6 +295,7 @@ private fun CameraCaptureStep(
     imageCapture: ImageCapture?,
     onImageCaptureReady: (ImageCapture) -> Unit,
     registerShutterTrigger: (() -> Unit) -> Unit,
+    hint: String,
     onCaptured: (File) -> Unit
 ) {
     val context = LocalContext.current
@@ -351,7 +371,7 @@ private fun CameraCaptureStep(
                 .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)).padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("盤全体が入るように撮影してください（音量キーでも撮影できます）")
+            Text(hint)
             Button(
                 modifier = Modifier.size(72.dp),
                 shape = CircleShape,
@@ -589,16 +609,21 @@ private fun decodeForDisplay(file: File, maxWidthPx: Int): Pair<Bitmap, PixelSiz
 
 /**
  * pointsがnullなら自動（赤丸）検出モード、指定すればその4点座標で透視変換するモード。
- * サーバの判定結果に応じて4種類のコールバックのいずれかを呼ぶ
- * （2026-06-22、UAT課題②：手動タップはonPendingConfirm経由でグリッド確認画面に進む）。
+ * resumeGameIdを指定すると対局再開（5回目UAT課題④）として扱われ、比較対象が初期配置
+ * ではなくそのKIFから再現した盤面になる。
+ *
+ * 2026-06-23、5回目UAT課題④で旧onMatch/onMismatchコールバックを廃止した——サーバは
+ * matrixが得られた時点で常にpending_confirmを返すようになり（不一致でも即フォールバック
+ * しなくなった）、即時onMatch/onMismatch分岐は実質onPendingConfirmと同じ経路の死んだ
+ * コードになっていたため、matchesTarget/mismatchCountをonPendingConfirmの引数として
+ * 渡す形に統合した（呼び出し側でグリッド確認画面の表示パターンを決める）。
  */
 private suspend fun submitCalibration(
     file: File,
     points: List<List<Double>>?,
-    onMatch: () -> Unit,
-    onMismatch: (Int) -> Unit,
+    resumeGameId: String?,
     onCalibrationFailed: () -> Unit,
-    onPendingConfirm: (String) -> Unit,
+    onPendingConfirm: (overlayBase64: String, matchesTarget: Boolean, mismatchCount: Int) -> Unit,
     // 2026-06-22、UAT報告対応：HTTPステータスコードも渡す（409＝対局中の食い違いを区別して
     // 自動復旧するため、呼び出し側のhandleError参照）。
     onError: (String, Int?) -> Unit
@@ -607,14 +632,17 @@ private suspend fun submitCalibration(
         val requestBody = file.asRequestBody("image/jpeg".toMediaType())
         val part = MultipartBody.Part.createFormData("file", file.name, requestBody)
         val pointsBody = points?.let { Gson().toJson(it).toRequestBody("text/plain".toMediaType()) }
-        val response = RetrofitClient.shogiApiService.calibrationPhoto(part, pointsBody)
+        val resumeBody = resumeGameId?.toRequestBody("text/plain".toMediaType())
+        val response = RetrofitClient.shogiApiService.calibrationPhoto(part, pointsBody, resumeBody)
         val body = response.body()
         when {
             !response.isSuccessful || body == null -> onError("HTTP ${response.code()}", response.code())
             body.status == "calibration_failed" -> onCalibrationFailed()
-            body.status == "pending_confirm" -> onPendingConfirm(body.grid_overlay_jpeg_base64 ?: "")
-            body.matches_initial == true -> onMatch()
-            else -> onMismatch(body.mismatch_count ?: -1)
+            else -> onPendingConfirm(
+                body.grid_overlay_jpeg_base64 ?: "",
+                body.matches_target == true,
+                body.mismatch_count ?: 0
+            )
         }
     } catch (e: Exception) {
         // 2026-06-21、タイムアウト原因調査用：アップロード完了までの時間と応答待ちの時間を
@@ -644,14 +672,21 @@ private suspend fun forceResetSession() {
 
 /**
  * UAT課題②（手動タップ後）・2回目UAT課題③（自動検出成功後）共通：サーバが返した
- * 緑グリッド線オーバーレイ画像を表示し、4隅の精度（透視変換が盤に正しく合っているか）を
- * 人間が目視確認する画面。OKなら対局開始、NGなら盤の四隅タップへ戻る
- * （同じ撮影写真への再タップ、撮り直しは不要）。
+ * 緑グリッド線オーバーレイ画像を表示する画面。2つの異なる目的で使われる：
+ * - isMismatchChoice=false（通常）：4隅の精度（透視変換が盤に正しく合っているか）を
+ *   人間が目視確認する。OKなら対局開始、NGなら盤の四隅タップへ戻る
+ *   （同じ撮影写真への再タップ、撮り直しは不要）。
+ * - isMismatchChoice=true（5回目UAT課題④で追加）：赤丸自動検出はできたが、認識結果が
+ *   比較対象（初期配置 or 中断局の盤面）とmismatchCount箇所異なる場合。以前は即・手動
+ *   タップへフォールバックしていたが、人間が見て「このまま進める（認識結果を正として
+ *   対局開始）」か「手動タップで直す」かを選べるようにした。
  */
 @Composable
 private fun GridConfirmStep(
     modifier: Modifier,
     overlayBitmap: Bitmap?,
+    isMismatchChoice: Boolean,
+    mismatchCount: Int,
     onOk: () -> Unit,
     onRetry: () -> Unit
 ) {
@@ -660,7 +695,12 @@ private fun GridConfirmStep(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "緑の線が盤のマスに正しく重なっているか確認してください",
+            text = if (isMismatchChoice) {
+                "認識結果が想定する盤面と${mismatchCount}マス異なります。このまま進めますか？" +
+                    "それとも手動タップで直しますか？（緑の線は4隅の精度確認用です）"
+            } else {
+                "緑の線が盤のマスに正しく重なっているか確認してください"
+            },
             modifier = Modifier.padding(12.dp)
         )
         if (overlayBitmap != null) {
@@ -678,8 +718,8 @@ private fun GridConfirmStep(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
             horizontalArrangement = Arrangement.SpaceEvenly
         ) {
-            Button(onClick = onRetry) { Text("やり直す") }
-            Button(onClick = onOk) { Text("OK（対局開始）") }
+            Button(onClick = onRetry) { Text(if (isMismatchChoice) "手動タップで直す" else "やり直す") }
+            Button(onClick = onOk) { Text(if (isMismatchChoice) "このまま進める" else "OK（対局開始）") }
         }
     }
 }

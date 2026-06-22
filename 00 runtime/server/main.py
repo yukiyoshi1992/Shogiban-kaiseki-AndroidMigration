@@ -7,17 +7,19 @@
 /calibration/confirmは廃止・統合済み（旧人間確認UIの残骸だったため）。代わりに
 グリッド確認専用の/calibration/confirm_gridを追加（UAT課題②、下記参照）:
   POST /calibration/photo        キャリブレーション写真（自動検出 or 4隅タップ）→ 認識結果。
-                                  「採用される可能性のある」キャリブレーション
-                                  （4隅タップは常に、自動検出は初期配置と一致した場合のみ）は、
-                                  対局開始の前にグリッド線重畫画像（緑線）を返し、人間が目視確認
-                                  する（status="pending_confirm"。2回目UAT課題③で自動検出側にも
-                                  適用範囲を拡大）。自動検出が初期配置と不一致の場合は人間の
-                                  手動タップへフォールバックする（status="ready"、対局開始もしない）。
-  POST /calibration/confirm_grid 上記の目視確認でOKだった場合のみ呼ぶ→対局開始。
+                                  矩形変換（matrix）が得られれば常に、対局開始の前に
+                                  グリッド線重畫画像（緑線）＋不一致件数を返し、人間が確認する
+                                  （status="pending_confirm"）。5回目UAT課題④で「自動検出が
+                                  不一致なら即・手動タップへ」という方針を変更し、不一致でも
+                                  人間が見て「このまま進める／手動タップで直す」を選べるように
+                                  した（resume_game_id省略時は初期配置、指定時は中断局のKIFから
+                                  再現した盤面が比較対象）。
+  POST /calibration/confirm_grid 上記の確認でOK、または不一致でも進める場合に呼ぶ→対局開始
+                                  （対局再開の場合は既存KIFを再開、新規なら新しいKIFを作る）。
   POST /move                     1手分の写真 → classify_frameで判定 → KIF追記+読み上げテキスト
   POST /game/end                 終局通知 → KIF確定、状態をidleに戻す
   POST /game/abort                対局中止 → 状態を無条件でidleに戻す（テスト用、UAT課題①）
-  GET  /games                    KIF一覧（開始日付で絞り込み可）
+  GET  /games                    KIF一覧（開始日付で絞り込み可、resumableで再開対象かも分かる）
   GET  /games/{game_id}          指定KIFの内容取得
 
 盤面認識・指し手判定ロジックは recognition.py、対局状態は session.py のシングルトンに分離。
@@ -33,6 +35,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import shogi
+import shogi.KIF
 from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
@@ -74,12 +77,60 @@ def _strip_kif_prefix(stem: str) -> str:
 
 def _rename_kif(new_prefix: str) -> None:
     """対局中のKIFファイルの状態プレフィックスを付け替える。/game/abortはどの状態からでも
-    無条件で呼べる設計のため、対局がまだ始まっていない（kif_path未設定）場合は何もしない。"""
+    無条件で呼べる設計のため、対局がまだ始まっていない（kif_path未設定）場合は何もしない。
+
+    5回目UAT課題④の実装中に発見（テストで同じ分内に複数の対局を開始・中止して再現）：
+    game_idは分単位（yyyyMMdd_hh-mm）なので、同じ分に複数回対局を開始・中止すると
+    異なる対局同士が同じ名前（【対局中止】等＋同じid）になり得て、renameが
+    FileExistsErrorで失敗していた（=対局中止/終局自体が500エラーで失敗し、クライアントは
+    終わったと思っているのにサーバ側のセッションが残り続ける——過去に直した409食い違いと
+    同種の問題）。衝突したら連番を振って回避する。
+    """
     if session.kif_path is None or not session.kif_path.exists():
         return
-    new_path = session.kif_path.with_name(f"{new_prefix}{session.game_id}.kif")
+    base_name = f"{new_prefix}{session.game_id}"
+    new_path = session.kif_path.with_name(f"{base_name}.kif")
+    suffix = 2
+    while new_path.exists() and new_path != session.kif_path:
+        new_path = session.kif_path.with_name(f"{base_name}_{suffix}.kif")
+        suffix += 1
     session.kif_path.rename(new_path)
     session.kif_path = new_path
+
+
+# 5回目UAT課題④（対局再開機能）：「終局していない棋譜」＝【対局完了】以外すべて
+# （【対局中】＝異常終了等で取り残されたもの、【対局中止】【対局エラー中止】＝ユーザーが
+# 明示的に終わらせたもの）を再開対象にする、とユーザー確認済み（対象を絞る理由はないとの判断）。
+RESUMABLE_PREFIXES = (KIF_PREFIX_PLAYING, KIF_PREFIX_ABORTED, KIF_PREFIX_ERROR_ABORTED)
+
+
+def _is_resumable(filename: str) -> bool:
+    return any(filename.startswith(p) for p in RESUMABLE_PREFIXES)
+
+
+def _find_resumable_kif(game_id: str) -> Path | None:
+    """安定識別子(game_id)から再開対象のKIFファイルを探す。【対局完了】や、状態表示
+    プレフィックスのない旧形式ファイルは対象外（旧形式は本機能より前のテストデータで、
+    再開対象かどうかが不明なため安全側に倒して対象外とする）。"""
+    for path in RUNTIME_GAMES_DIR.glob("*.kif"):
+        if _is_resumable(path.name) and _strip_kif_prefix(path.stem) == game_id:
+            return path
+    return None
+
+
+_KIF_START_TIME_RE = re.compile(r"開始日時：(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})")
+
+
+def _load_kif_for_resume(path: Path) -> tuple[list[str], "datetime | None"]:
+    """保存済みKIFファイルから指し手の履歴（USI形式）と対局開始時刻を復元する。
+    開始日時ヘッダーは②対応（2026-06-23）より前のKIFには存在しないため、見つからなければ
+    Noneを返す（呼び出し側は現在時刻にフォールバックする）。"""
+    parsed = shogi.KIF.Parser.parse_file(str(path))[0]
+    moves = list(parsed["moves"])
+    text = path.read_text(encoding="utf-8")
+    m = _KIF_START_TIME_RE.search(text)
+    start_time = datetime.strptime(m.group(1), "%Y/%m/%d %H:%M:%S") if m else None
+    return moves, start_time
 
 
 def _log(msg: str) -> None:
@@ -139,9 +190,13 @@ async def receive_photo(file: UploadFile) -> dict[str, str]:
 
 
 @app.post("/calibration/photo")
-async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
-    """写真を受け取りキャリブレーションし、必要なら対局開始まで1リクエストで完了する。
-    idleからのみ呼べる（失敗・不一致時はidleに留まるので何度でも呼び直せる）。
+async def calibration_photo(
+    file: UploadFile,
+    points: str | None = Form(None),
+    resume_game_id: str | None = Form(None),
+):
+    """写真を受け取りキャリブレーションし、グリッド確認待ち（pending_confirm）にする。
+    idleからのみ呼べる（失敗・確認待ちのままなら何度でも呼び直せる）。
 
     pointsを省略すると、まず前PJと同じ赤丸4個の自動検出を試す
     （2026-06-21、「4隅の手動タップが難しすぎる」というユーザー指摘により、
@@ -150,23 +205,27 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     同じ写真に対して盤の4隅座標を添えてこのエンドポイントを再度呼ぶ（人間のフォールバック）。
     pointsを指定した場合は常にその4点座標（JSON配列 "[[x1,y1],...,[x4,y4]]"、順不同）を使う。
 
-    対局開始の判断（2026-06-22、旧/calibration/confirmを統合。2回目UAT課題③で範囲拡大）：
-    手動タップ（points指定）・自動検出が初期配置と完全一致した場合は、いずれも
-    「採用される可能性のあるキャリブレーション」として人間にグリッド線確認をさせる
-    （status="pending_confirm"。対局開始は/calibration/confirm_gridを待つ）。
-    自動検出が不一致の場合は対局を開始せずstatus="ready"を返し、idleに留まる
-    （アプリ側は人間の手動タップへフォールバックする）。
-    旧設計では「9x9を人間が目視確認してOKを押す」ための別エンドポイント
-    （/calibration/confirm）への2回目のリクエストが必要だったが、その人間確認UIは
-    自動判定（matches_initial）に置き換えられて廃止済みで、2回目のリクエストに
-    人間の判断は何も介在しなくなっていた。かつこの2回目のリクエストが実機で
-    断続的にタイムアウトする事象が確認されたため、両エンドポイントを統合し
-    2回目の通信自体をなくした。UAT課題②でグリッド確認（タップ精度の目視確認）として
-    2回目の通信が復活したが、今度は人間の判断が実際に介在するので同種のタイムアウト
-    再発リスクは小さいと判断（RetrofitClientのConnectionPool設定も対策済み）。
+    resume_game_idを指定すると、新規対局（初期配置と比較）ではなく中断局の再開
+    （5回目UAT課題④）として扱う——比較対象はそのKIFファイルから再現した盤面になる。
+    省略時（通常の新規対局）は初期配置（shogi.Board()）と比較する。
+
+    対局開始の判断（2026-06-23、5回目UAT課題④で「不一致時は即・手動タップへ」方針を変更）：
+    赤丸自動検出・手動タップのいずれでも、矩形変換（matrix）が得られた時点で常に
+    pending_confirm（グリッド線オーバーレイ＋認識結果の不一致件数）を返す。以前は
+    自動検出が比較対象と不一致の場合、人間に見せずに即・手動タップへフォールバックして
+    いたが、ユーザーから「不一致でも内容を見せて、このまま進めるか手動で直すか選べる
+    ようにしたい（駒の並べ間違いに気づけたケースがあったため）」との明確な指示を
+    受けて変更した。手動タップ側はこれまで通り「無条件採用」方針（個別マス補正はしない）
+    のまま変更なし——pending_confirmのmismatch_countは手動タップでは表示用の参考情報
+    （アプリ側は従来通りOK/やり直すの2択のみを出す）。
+    不一致のまま人間が「このまま進める」を選んだ場合に備え、認識結果から復元した
+    Boardも`pending_board`としてこの時点で計算・保持しておく
+    （`recognition.label_grid_to_board`、confirm_grid側は分岐を持たず常に
+    `pending_board`を使うだけで済む）。
     """
     t_start = time.perf_counter()
-    _log(f"[calibration/photo] request received, mode={'auto' if points is None else 'manual'}")
+    _log(f"[calibration/photo] request received, mode={'auto' if points is None else 'manual'}"
+         f"{f', resume={resume_game_id}' if resume_game_id else ''}")
     body = await file.read()
     t_body_read = time.perf_counter()
     img = _decode_image(body)
@@ -182,6 +241,19 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
 
     if session.state != GameState.IDLE:
         raise HTTPException(409, f"calibration not allowed in state={session.state.value}")
+
+    resume_kif_path: Path | None = None
+    resume_moves: list[str] = []
+    resume_start_time = None
+    if resume_game_id is not None:
+        resume_kif_path = _find_resumable_kif(resume_game_id)
+        if resume_kif_path is None:
+            raise HTTPException(404, f"resumable game not found: {resume_game_id}")
+        resume_moves, resume_start_time = _load_kif_for_resume(resume_kif_path)
+
+    target_board = shogi.Board()
+    for usi in resume_moves:
+        target_board.push_usi(usi)
 
     if points is None:
         matrix = recognition.calibrate_from_image(img)
@@ -205,75 +277,95 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     warped = recognition.warp_board(img, matrix)
     recognized = recognition.predict_board(MODEL, warped)
     t_predict = time.perf_counter()
-    mismatches = recognition.compare_to_initial(recognized)
+    mismatches = recognition.compare_to_board(recognized, target_board)
+    pending_board = (
+        target_board if len(mismatches) == 0
+        else recognition.label_grid_to_board(recognized, target_board)
+    )
 
-    # 「採用される可能性のあるキャリブレーション」はpending_confirm（グリッド線オーバーレイを
-    # 返し、人間の目視確認後に/calibration/confirm_gridで対局開始）に進む：
-    # - 手動タップ（points指定）は常に（前PJ方針通り無条件採用、タップ精度の確認のみ挟む）
-    # - 自動検出は初期配置と完全一致した場合のみ（2026-06-22、2回目UAT課題③で追加。
-    #   従来は自動検出の一致判定＝盤面認識の正しさの確認だけで対局を即時開始していたが、
-    #   それは「4隅タップ自体の精度（透視変換が盤に正しく合っているか）」の確認ではないため、
-    #   手動タップと同じグリッド確認をくぐらせるよう統一した）。
-    # 自動検出が初期配置と不一致の場合のみpending_confirmに進まず、ready（idle留まり、
-    # 人間の手動タップへフォールバック）のまま。
-    pending = points is not None or len(mismatches) == 0
+    session.pending_calib_matrix = matrix
+    session.pending_board = pending_board
+    session.pending_resume_kif_path = resume_kif_path
+    session.pending_resume_moves = resume_moves
+    session.pending_resume_start_time = resume_start_time
+    session.pending_resume_game_id = resume_game_id
+
+    overlay_b64 = base64.b64encode(recognition.grid_overlay_jpeg_bytes(img, matrix)).decode("ascii")
     t_end = time.perf_counter()
-    if pending:
-        session.pending_calib_matrix = matrix
-        overlay_b64 = base64.b64encode(recognition.grid_overlay_jpeg_bytes(img, matrix)).decode("ascii")
-        _log(f"[timing] body_read={t_body_read-t_start:.2f}s decode={t_decode-t_body_read:.2f}s "
-             f"save={t_save-t_decode:.2f}s calib={t_calib-t_save:.2f}s predict={t_predict-t_calib:.2f}s "
-             f"total={t_end-t_start:.2f}s -> pending_confirm "
-             f"(responding now, mismatch_count={len(mismatches)})")
-        return {
-            "status": "pending_confirm",
-            "grid_overlay_jpeg_base64": overlay_b64,
-            "recognized": recognized,
-            "matches_initial": len(mismatches) == 0,
-            "mismatch_count": len(mismatches),
-        }
-
     _log(f"[timing] body_read={t_body_read-t_start:.2f}s decode={t_decode-t_body_read:.2f}s "
          f"save={t_save-t_decode:.2f}s calib={t_calib-t_save:.2f}s predict={t_predict-t_calib:.2f}s "
-         f"total={t_end-t_start:.2f}s -> ready (auto mismatch, falling back to manual tap) "
+         f"total={t_end-t_start:.2f}s -> pending_confirm "
          f"(responding now, mismatch_count={len(mismatches)})")
     return {
-        "status": "ready",
-        "game_id": None,
+        "status": "pending_confirm",
+        "grid_overlay_jpeg_base64": overlay_b64,
         "recognized": recognized,
-        "matches_initial": False,
+        "matches_target": len(mismatches) == 0,
         "mismatch_count": len(mismatches),
     }
 
 
 @app.post("/calibration/confirm_grid")
 async def calibration_confirm_grid():
-    """グリッド目視確認でOKだった場合に呼ぶ→対局開始。手動タップ（UAT課題②）・
-    自動検出成功（2回目UAT課題③）のどちらの後でも同じエンドポイントを使う。
-    NGの場合はこのエンドポイントを呼ばず、アプリ側は手動タップ画面に戻るだけでよい
-    （pending_calib_matrixは次の/calibration/photoで上書きされるか、対局中止/再起動で
-    クリアされる）。
+    """グリッド確認でOK、または不一致でも「このまま進める」を選んだ場合に呼ぶ→対局開始
+    （5回目UAT課題④で、不一致でも進められるよう拡張）。手動タップ・自動検出成功・
+    自動検出不一致のいずれの後でも同じエンドポイントを使う。NGの場合はこのエンドポイントを
+    呼ばず、アプリ側は手動タップ画面に戻るだけでよい（pending_*は次の/calibration/photoで
+    上書きされるか、対局中止/再起動でクリアされる）。
+
+    `session.pending_resume_kif_path`が設定されていれば対局再開——既存のKIFファイルの
+    状態表示を【対局中】に戻し、指し手履歴・対局開始時刻を引き継ぐ。未設定なら新規対局
+    として新しいKIFファイルを作る。いずれも`session.board`には（一致していればそのまま、
+    不一致でも人間が進めることを選んだ場合は認識結果から復元した）`pending_board`を使う
+    ——以後の指し手判定はこのBoardを正として行われる。
     """
-    if session.pending_calib_matrix is None:
+    if session.pending_calib_matrix is None or session.pending_board is None:
         raise HTTPException(409, "no pending calibration to confirm")
 
     matrix = session.pending_calib_matrix
+    board = session.pending_board
+    resume_kif_path = session.pending_resume_kif_path
+    resume_moves = session.pending_resume_moves
+    resume_start_time = session.pending_resume_start_time
+    resume_game_id = session.pending_resume_game_id
     session.pending_calib_matrix = None
+    session.pending_board = None
+    session.pending_resume_kif_path = None
+    session.pending_resume_moves = []
+    session.pending_resume_start_time = None
+    session.pending_resume_game_id = None
+
     session.calib_matrix = matrix
-    session.board = shogi.Board()
-    session.moves_usi = []
+    session.board = board
     now = datetime.now()
-    session.start_time = now
-    session.last_move_time = now
-    game_id = now.strftime("%Y%m%d_%H-%M")
-    session.game_id = game_id
-    session.kif_path = RUNTIME_GAMES_DIR / f"{KIF_PREFIX_PLAYING}{game_id}.kif"
-    session.kif_path.write_text(
-        f"開始日時：{now.strftime('%Y/%m/%d %H:%M:%S')}\n手数----指手---------消費時間--\n",
-        encoding="utf-8",
-    )
+
+    if resume_kif_path is not None:
+        session.moves_usi = list(resume_moves)
+        session.game_id = resume_game_id
+        new_path = resume_kif_path.with_name(f"{KIF_PREFIX_PLAYING}{resume_game_id}.kif")
+        if resume_kif_path != new_path:
+            resume_kif_path.rename(new_path)
+        session.kif_path = new_path
+        # 累計時間は元の対局開始時刻からそのまま積み上げる（中断していた間の実時間も
+        # 含む。ユーザー確認済み：複雑な特別扱いより、シンプルで壊れにくい方を優先）。
+        # ただし直前の手からの消費時間は、中断中の実時間を「今回の手の思考時間」として
+        # 記録してしまうと明らかに不自然なため、再開した今この瞬間を起点にする。
+        session.start_time = resume_start_time or now
+        session.last_move_time = now
+    else:
+        session.moves_usi = []
+        game_id = now.strftime("%Y%m%d_%H-%M")
+        session.game_id = game_id
+        session.kif_path = RUNTIME_GAMES_DIR / f"{KIF_PREFIX_PLAYING}{game_id}.kif"
+        session.kif_path.write_text(
+            f"開始日時：{now.strftime('%Y/%m/%d %H:%M:%S')}\n手数----指手---------消費時間--\n",
+            encoding="utf-8",
+        )
+        session.start_time = now
+        session.last_move_time = now
+
     session.state = GameState.PLAYING
-    return {"status": "playing", "game_id": game_id}
+    return {"status": "playing", "game_id": session.game_id}
 
 
 @app.post("/move")
@@ -382,6 +474,8 @@ async def list_games(date: str | None = None):
     3回目UAT課題③：ファイル名が【対局中】等の状態プレフィックス付きになったため、
     日付抽出は固定インデックスではなく「最初に現れる8桁の数字」を正規表現で拾う方式に変更
     （新形式・旧形式game_YYYYMMDD_HHMMSSの両方に対応）。
+
+    5回目UAT課題④：`resumable`（終局していない棋譜＝再開対象になるか）を追加。
     """
     date_filter = date.replace("-", "") if date else None
     games = []
@@ -390,7 +484,11 @@ async def list_games(date: str | None = None):
         date_part = m.group(0) if m else ""
         if date_filter and date_part != date_filter:
             continue
-        games.append({"id": _strip_kif_prefix(path.stem), "filename": path.name})
+        games.append({
+            "id": _strip_kif_prefix(path.stem),
+            "filename": path.name,
+            "resumable": _is_resumable(path.name),
+        })
     return {"games": games}
 
 

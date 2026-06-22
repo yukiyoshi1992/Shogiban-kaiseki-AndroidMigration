@@ -323,6 +323,11 @@ def square_to_rc(sq):
     return row, col
 
 
+def rc_to_square(row, col):
+    """square_to_rcの逆変換（5回目UAT課題④：対局再開時の盤面復元用）"""
+    return (8 - col) * 9 + row
+
+
 def board_to_label_grid(board):
     """shogi.Boardを9x9ラベルグリッドに変換する"""
     grid = [["empty"] * 9 for _ in range(9)]
@@ -339,25 +344,57 @@ def board_to_label_grid(board):
     return grid
 
 
-def compare_to_initial(recognized):
-    """recognizedを将棋の初期配置と比較する。
+def compare_to_board(recognized, board):
+    """recognizedを任意の盤面（boardのboard_to_label_grid）と比較する。
 
-    キャリブレーションは常に対局開始前の初期配置に対して行うため、認識結果が初期配置と
-    一致するかどうかは人間が9x9を目視確認しなくてもプログラム側で判定できる
+    新規対局の確認は常にshogi.Board()（初期配置）が比較対象だったが、5回目UAT課題④
+    （対局再開機能）により、中断局のKIFから再現した盤面が比較対象になるケースが
+    増えたため、`compare_to_initial`を一般化した（旧名は廃止、呼び出し側で
+    `compare_to_board(recognized, shogi.Board())`と書けば同じ）。
+
+    キャリブレーションは常に「答えが分かっている既知の局面」に対して行うため、
+    認識結果が一致するかどうかは人間が9x9を目視確認しなくてもプログラム側で判定できる
     （2026-06-21、実機テストでのユーザー指摘により、キャリブレーション確認UIを
-    「人間が見て判断」から「プログラムが自動判定」に変更）。前PJ run_realtime.py の
-    INITIAL_BOARD_STD直書きではなく、shogi.Board()の初期状態をboard_to_label_gridに
-    通して使う（指し手判定ロジックの初期状態と単一の真実を共有するため）。
+    「人間が見て判断」から「プログラムが自動判定」に変更）。
 
     Returns: [(row, col, expected, got), ...]  空リストなら完全一致。
     """
-    expected_grid = board_to_label_grid(shogi.Board())
+    expected_grid = board_to_label_grid(board)
     mismatches = []
     for r in range(9):
         for c in range(9):
             if recognized[r][c] != expected_grid[r][c]:
                 mismatches.append((r, c, expected_grid[r][c], recognized[r][c]))
     return mismatches
+
+
+def label_grid_to_board(grid, reference_board):
+    """9x9認識結果(grid)を盤上の駒配置として復元したshogi.Boardを作る
+    （5回目UAT課題④：認識結果がreference_boardと不一致でも、人間が「このまま進める」を
+    選んだ場合に使う——以後の対局はこの盤面を正として指し手判定する）。
+
+    手番・持ち駒（駒台）はreference_boardから引き継ぐ。駒台はそもそも写真からは
+    視覚的に読み取らない既存方針（captured-piece trackingはBoard状態の差分のみで行う）
+    のため、写真からは判定できない。reference_boardは新規対局なら常にshogi.Board()
+    （持ち駒なし）、対局再開ならKIFから再現した盤面（持ち駒あり）になる。
+    """
+    board = shogi.Board()
+    board.clear()
+    for r in range(9):
+        for c in range(9):
+            label = grid[r][c]
+            if label == "empty":
+                continue
+            color_prefix, piece_name = label.split("_", 1)
+            piece_type = LABEL_TO_PIECE.get(piece_name)
+            if piece_type is None:
+                continue
+            color = shogi.BLACK if color_prefix == "sente" else shogi.WHITE
+            board.set_piece_at(rc_to_square(r, c), shogi.Piece(piece_type, color))
+    board.turn = reference_board.turn
+    for color in (shogi.BLACK, shogi.WHITE):
+        board.pieces_in_hand[color] = reference_board.pieces_in_hand[color].copy()
+    return board
 
 
 def diff_count(grid_a, grid_b):

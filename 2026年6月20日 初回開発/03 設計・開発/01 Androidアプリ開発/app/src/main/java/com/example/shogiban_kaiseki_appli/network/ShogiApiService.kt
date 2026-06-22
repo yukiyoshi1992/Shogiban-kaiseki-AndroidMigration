@@ -13,7 +13,10 @@ interface ShogiApiService {
     @POST("calibration/photo")
     suspend fun calibrationPhoto(
         @Part file: MultipartBody.Part,
-        @Part("points") points: RequestBody? = null
+        @Part("points") points: RequestBody? = null,
+        // 5回目UAT課題④（対局再開機能）：指定すると、比較対象が初期配置ではなく
+        // そのgame_idのKIFから再現した盤面になる。
+        @Part("resume_game_id") resumeGameId: RequestBody? = null
     ): Response<CalibrationPhotoResponse>
 
     @POST("calibration/confirm_grid")
