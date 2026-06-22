@@ -15,9 +15,6 @@ interface ShogiApiService {
         @Part("points") points: RequestBody? = null
     ): Response<CalibrationPhotoResponse>
 
-    @POST("calibration/confirm")
-    suspend fun calibrationConfirm(): Response<CalibrationConfirmResponse>
-
     @Multipart
     @POST("move")
     suspend fun move(@Part file: MultipartBody.Part): Response<MoveResponse>

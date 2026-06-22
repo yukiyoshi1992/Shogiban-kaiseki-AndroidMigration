@@ -103,21 +103,16 @@ fun CalibrationScreen(
         tapPoints = emptyList()
     }
 
-    fun proceedToConfirm() {
-        coroutineScope.launch {
-            confirmCalibration(
-                onSuccess = { onCalibrated() },
-                onError = { msg -> errorMessage = msg; phase = CalibPhase.ERROR }
-            )
-        }
-    }
-
     // 自動検出（赤丸）モード：失敗・不一致いずれも人間の4隅タップにフォールバックする
     // （前PJ run_realtime.py と同じ「エラーが出たら即・人間が直す」方針）。
+    // 2026-06-22、自動検出が初期配置と一致した場合、サーバが/calibration/photo 1回の
+    // レスポンス内で対局開始まで完了させるようになった（旧/calibration/confirmへの
+    // 2回目のリクエストを統合・廃止——その2回目が実機で断続的にタイムアウトする事象が
+    // 確認されたため）。onMatchはもう追加の通信をせず、直接onCalibrated()を呼ぶ。
     fun handleAutoResult(file: File) {
         coroutineScope.launch {
             submitCalibration(file, points = null,
-                onMatch = { proceedToConfirm() },
+                onMatch = { onCalibrated() },
                 onMismatch = { count ->
                     tappingHint = "自動認識が初期配置と${count}箇所異なりました。盤の四隅をタップしてください"
                     phase = CalibPhase.TAPPING
@@ -136,8 +131,8 @@ fun CalibrationScreen(
     fun handleManualResult(file: File, points: List<List<Double>>) {
         coroutineScope.launch {
             submitCalibration(file, points,
-                onMatch = { proceedToConfirm() },
-                onMismatch = { proceedToConfirm() },
+                onMatch = { onCalibrated() },
+                onMismatch = { onCalibrated() },
                 onCalibrationFailed = { errorMessage = "サーバ側でキャリブレーションに失敗しました"; phase = CalibPhase.ERROR },
                 onError = { msg -> errorMessage = msg; phase = CalibPhase.ERROR }
             )
@@ -543,14 +538,5 @@ private suspend fun submitCalibration(
         // 2026-06-21、タイムアウト原因調査用：アップロード完了までの時間と応答待ちの時間を
         // 画面のエラー表示に含める（Logcatを見られない状況でも切り分けられるようにするため）。
         onError("${e.message ?: "通信エラー"} [${com.example.shogiban_kaiseki_appli.network.NetworkTiming.lastSummary}]")
-    }
-}
-
-private suspend fun confirmCalibration(onSuccess: () -> Unit, onError: (String) -> Unit) {
-    try {
-        val response = RetrofitClient.shogiApiService.calibrationConfirm()
-        if (response.isSuccessful) onSuccess() else onError("HTTP ${response.code()}")
-    } catch (e: Exception) {
-        onError(e.message ?: "通信エラー")
     }
 }

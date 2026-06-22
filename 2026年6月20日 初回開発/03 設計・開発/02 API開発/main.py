@@ -26,7 +26,7 @@ from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
 import recognition
-from session import GameState, PendingCalibration, session
+from session import GameState, session
 
 app = FastAPI()
 
@@ -85,8 +85,8 @@ async def receive_photo(file: UploadFile) -> dict[str, str]:
 
 @app.post("/calibration/photo")
 async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
-    """写真を受け取りキャリブレーションする。idle・ready のどちらからでも呼べる
-    （readyからはキャリブレーションのやり直しを意味する）。
+    """写真を受け取りキャリブレーションし、必要なら対局開始まで1リクエストで完了する。
+    idleからのみ呼べる（失敗・不一致時はidleに留まるので何度でも呼び直せる）。
 
     pointsを省略すると、まず前PJと同じ赤丸4個の自動検出を試す
     （2026-06-21、「4隅の手動タップが難しすぎる」というユーザー指摘により、
@@ -94,10 +94,19 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     自動検出に失敗した場合は status="calibration_failed" を返すので、アプリ側は
     同じ写真に対して盤の4隅座標を添えてこのエンドポイントを再度呼ぶ（人間のフォールバック）。
     pointsを指定した場合は常にその4点座標（JSON配列 "[[x1,y1],...,[x4,y4]]"、順不同）を使う。
+
+    対局開始の判断（2026-06-22、旧/calibration/confirmを統合）：
+    手動タップ（points指定）は前PJの方針通り常に無条件採用、自動検出は初期配置と
+    完全一致した場合のみ、その場でstate→playingにして対局を開始する
+    （status="playing"）。自動検出が不一致の場合は対局を開始せずstatus="ready"を返し、
+    idleに留まる（アプリ側は人間の手動タップへフォールバックする）。
+    旧設計では「9x9を人間が目視確認してOKを押す」ための別エンドポイント
+    （/calibration/confirm）への2回目のリクエストが必要だったが、その人間確認UIは
+    自動判定（matches_initial）に置き換えられて廃止済みで、2回目のリクエストに
+    人間の判断は何も介在しなくなっていた。かつこの2回目のリクエストが実機で
+    断続的にタイムアウトする事象が確認されたため、両エンドポイントを統合し
+    2回目の通信自体をなくした。
     """
-    # 2026-06-21、実機で「サーバはuvicornログ上200 OKで完了しているのにクライアント側が
-    # タイムアウトする」という再現性のある事象を調査するため、サーバ内処理の各段階の
-    # 所要時間を計測してコンソールに出す（原因調査用、恒久的なログではない）。
     t_start = time.perf_counter()
     _log(f"[calibration/photo] request received, mode={'auto' if points is None else 'manual'}")
     body = await file.read()
@@ -113,7 +122,7 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     _save_runtime_photo(img, "calib")
     t_save = time.perf_counter()
 
-    if session.state not in (GameState.IDLE, GameState.READY):
+    if session.state != GameState.IDLE:
         raise HTTPException(409, f"calibration not allowed in state={session.state.value}")
 
     if points is None:
@@ -140,45 +149,30 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     t_predict = time.perf_counter()
     mismatches = recognition.compare_to_initial(recognized)
 
-    session.pending_calibration = PendingCalibration(matrix=matrix, recognized=recognized)
-    session.state = GameState.READY
+    start_game = (points is not None) or (len(mismatches) == 0)
+    game_id = None
+    if start_game:
+        session.calib_matrix = matrix
+        session.board = shogi.Board()
+        session.moves_usi = []
+        game_id = f"game_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        session.game_id = game_id
+        session.kif_path = RUNTIME_GAMES_DIR / f"{game_id}.kif"
+        session.kif_path.write_text("手数----指手---------消費時間--\n", encoding="utf-8")
+        session.state = GameState.PLAYING
+
     t_end = time.perf_counter()
     _log(f"[timing] body_read={t_body_read-t_start:.2f}s decode={t_decode-t_body_read:.2f}s "
          f"save={t_save-t_decode:.2f}s calib={t_calib-t_save:.2f}s predict={t_predict-t_calib:.2f}s "
-         f"total={t_end-t_start:.2f}s -> ready (responding now, mismatch_count={len(mismatches)})")
+         f"total={t_end-t_start:.2f}s -> {'playing' if start_game else 'ready'} "
+         f"(responding now, mismatch_count={len(mismatches)})")
     return {
-        "status": "ready",
+        "status": "playing" if start_game else "ready",
+        "game_id": game_id,
         "recognized": recognized,
         "matches_initial": len(mismatches) == 0,
         "mismatch_count": len(mismatches),
     }
-
-
-@app.post("/calibration/confirm")
-async def calibration_confirm():
-    """人間が認識結果を確認OKした際に呼ぶ。対局開始（盤=将棋の初期配置）。"""
-    # 2026-06-22、タイムアウト調査用：赤丸自動検出が成功した直後にだけクライアントが
-    # このエンドポイントを追加で呼ぶ（`/calibration/photo`がmatches_initial=trueを返した時のみ
-    # `proceedToConfirm()`経由で呼ばれる）ため、ここが疑わしいというユーザー指摘を受けて計測。
-    t_start = time.perf_counter()
-    _log("[calibration/confirm] request received")
-    if session.state != GameState.READY or session.pending_calibration is None:
-        _log(f"[calibration/confirm] 409 rejected, state={session.state.value}")
-        raise HTTPException(409, "no pending calibration to confirm")
-
-    session.calib_matrix = session.pending_calibration.matrix
-    session.pending_calibration = None
-    session.board = shogi.Board()
-    session.moves_usi = []
-    session.game_id = f"game_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    session.kif_path = RUNTIME_GAMES_DIR / f"{session.game_id}.kif"
-    t_before_write = time.perf_counter()
-    session.kif_path.write_text("手数----指手---------消費時間--\n", encoding="utf-8")
-    t_end = time.perf_counter()
-    session.state = GameState.PLAYING
-    _log(f"[calibration/confirm] pre_write={t_before_write-t_start:.2f}s kif_write={t_end-t_before_write:.2f}s "
-         f"total={t_end-t_start:.2f}s -> playing (responding now)")
-    return {"status": "playing", "game_id": session.game_id}
 
 
 @app.post("/move")
