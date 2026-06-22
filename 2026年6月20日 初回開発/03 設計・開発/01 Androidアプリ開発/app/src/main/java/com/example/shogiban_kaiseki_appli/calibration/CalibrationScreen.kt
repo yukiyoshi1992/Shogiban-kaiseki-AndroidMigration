@@ -29,6 +29,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -326,8 +327,18 @@ private fun CameraCaptureStep(
         )
     }
 
-    LaunchedEffect(Unit) {
+    // 6回目UAT課題①：このcapture()はCAMERA段階（このComposableが画面に出ている間）専用。
+    // 以前はLaunchedEffect(Unit)で登録するだけで、TAPPING/GRID_CONFIRM等へ進んだ後も
+    // MainActivityのshutterTriggerにこのcapture()が残り続けていた。そのため、その後に
+    // 届いた音量キーイベント（Bluetoothシャッターの接続時にAVRCPの絶対音量ネゴシエーションが
+    // 誤って音量キーイベントを連射することがある、と判明済み）が、今表示中の画面と無関係に
+    // 新しい撮影→自動キャリブレーション送信を割り込ませ、手動タップの進行状況を巻き戻して
+    // いた（サーバログで同一写真でも複数枚でもなく、無関係な新規撮影がmode=autoで連続POST
+    // されていたことから確定）。DisposableEffectでこの画面を離れる際に登録を空振り
+    // （no-op）に戻すことで、CAMERA段階以外では音量キーが何もしないようにする。
+    DisposableEffect(Unit) {
         registerShutterTrigger { capture() }
+        onDispose { registerShutterTrigger {} }
     }
 
     Box(modifier = modifier.fillMaxSize()) {

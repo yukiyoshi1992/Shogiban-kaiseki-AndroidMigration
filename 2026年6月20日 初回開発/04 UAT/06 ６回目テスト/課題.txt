@@ -1,0 +1,52 @@
+
+＝＝＝
+課題①　Bluetoothシャッター接続時の誤中止
+＝＝＝
+
+手動キャリブレーションのタイミングでも同様の事象が発生するため、その際のログを送付します。
+
+再現手順）
+①適当な画像を取って手動キャリブレーションに進む
+②bluetoothシャッタのスイッチをONにする→スマホにつながる
+③特に何も表示されず勝手に最初の撮影画面に戻る。
+
+ログ）
+"\\YukiYoshiNAS\Shogiban-kaiseki-appli\2026年6月20日 初回開発\04 UAT\06 ６回目テスト\lotgcat.txt"
+
+サーバログ）
+yukiy@YukiYoshiDesktop MINGW64 //YukiYoshiNAS/Shogiban-kaiseki-appli/00 runtime/server (main)
+$ python -m uvicorn main:app --host 0.0.0.0 --port 8000
+INFO:     Started server process [7508]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+▒▒▒f▒▒▒ǂݍ▒▒ݒ▒...
+▒▒▒f▒▒▒ǂݍ▒▒݊▒▒▒▒B
+▒▒▒f▒▒▒̃E▒H▒[▒▒▒A▒b▒v▒▒▒i▒▒▒񐄘_▒R▒X▒g▒▒▒▒▒▒▒ŕ▒▒▒▒j...
+▒E▒H▒[▒▒▒A▒b▒v▒▒▒▒▒i2.28▒b▒j▒B
+[calibration/photo] request received, mode=auto
+[timing] body_read=0.01s decode=0.07s save=0.29s calib=0.12s -> calibration_failed (responding now)
+INFO:     192.168.0.141:41944 - "POST /calibration/photo HTTP/1.1" 200 OK
+[calibration/photo] request received, mode=auto
+[timing] body_read=0.02s decode=0.05s save=0.14s calib=0.05s -> calibration_failed (responding now)
+INFO:     192.168.0.141:45232 - "POST /calibration/photo HTTP/1.1" 200 OK
+[calibration/photo] request received, mode=auto
+[timing] body_read=0.01s decode=0.06s save=0.17s calib=0.06s -> calibration_failed (responding now)
+INFO:     192.168.0.141:45246 - "POST /calibration/photo HTTP/1.1" 200 OK
+[calibration/photo] request received, mode=auto
+[timing] body_read=0.01s decode=0.05s save=0.12s calib=0.06s -> calibration_failed (responding now)
+INFO:     192.168.0.141:43540 - "POST /calibration/photo HTTP/1.1" 200 OK
+
+
+＝＝＝
+課題②
+＝＝＝
+
+アプリの動きがめちゃくちゃ遅くなってしまいました。
+画像撮影から何から何まであまりにもレスポンスが悪くて、バグってます。
+
+一例として、
+以下のように対局中に「カメラ未準備のため撮影できませんでした」と出るなど。
+"\\YukiYoshiNAS\Shogiban-kaiseki-appli\2026年6月20日 初回開発\04 UAT\06 ６回目テスト\Screenshot_2026-06-23-07-31-01-55_d6678767e10c94127ab572d990755d1b.jpg"
+
+原因がわからなければ、昨晩の改修前までロールバックしたほうがいいレベルです。
