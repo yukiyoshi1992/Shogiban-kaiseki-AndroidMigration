@@ -1,6 +1,9 @@
 package com.example.shogiban_kaiseki_appli.gamelist
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,6 +43,11 @@ import kotlinx.coroutines.launch
  * （private object GameListRetrofit）は削除し、network/RetrofitClient.ktの
  * gameListApiServiceを使うよう変更（OkHttpClientの設定を1か所にまとめるため、
  * integration_note.txtの「本実装に格上げする場合」の指示通り）。
+ *
+ * 2026-06-22、KENTO連携方式が確定（Discord経由のユーザー判断）：KENTOの棋譜リストAPIは
+ * こちら側からインターネットへAPIを公開する必要があり、セキュリティ上望ましくないため
+ * 採用しない。代わりに「棋譜をクリップボードにコピー→KENTOサイトを開いて貼り付け」という
+ * 手動連携にする、との明確な指示を受けてクリップボードコピーボタンを追加した。
  */
 @Composable
 fun GameListScreen(modifier: Modifier = Modifier, onBack: () -> Unit) {
@@ -76,6 +84,13 @@ fun GameListScreen(modifier: Modifier = Modifier, onBack: () -> Unit) {
                     }
                     context.startActivity(Intent.createChooser(intent, "KIFを共有"))
                 }) { Text("共有（LINE/メール）") }
+                // 2026-06-22、KENTO連携用：KENTO自体へのAPI連携は見送り、コピー→KENTOサイトで
+                // 貼り付けという手動連携にするとの指示を受けて追加。
+                Button(onClick = {
+                    val clipboard = context.getSystemService(ClipboardManager::class.java)
+                    clipboard.setPrimaryClip(ClipData.newPlainText("KIF", selectedKif))
+                    Toast.makeText(context, "棋譜をクリップボードにコピーしました", Toast.LENGTH_SHORT).show()
+                }) { Text("コピー（KENTO用）") }
                 Button(onClick = { selectedKif = null }) { Text("一覧に戻る") }
             }
         }
