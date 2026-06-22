@@ -232,6 +232,21 @@ fun CalibrationScreen(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(text = "エラー: $errorMessage")
                 Button(onClick = { resetToCamera() }) { Text("撮影からやり直す") }
+                // 2026-06-22、UAT報告：撮影しても409 Conflictになり「どうしてよいかわからない」
+                // 事象への対応。原因はクライアント側のアプリ再起動等で画面がキャリブレーション
+                // （idle相当）に戻っていても、サーバ側のセッション（プロセス内シングルトン、
+                // アプリを再起動しても消えない）は前の対局がplayingのまま残ってしまうケースが
+                // ありうること——クライアントからは「サーバがidleかplayingか」を見分ける手段が
+                // これまでなく、その状態で復旧する手段がキャリブレーション画面側に無かった。
+                // /game/abortは元々「どの状態からでも無条件でidleに戻す」設計（初回UAT課題①）
+                // なので、ここから呼べるようにして復旧手段を用意する（実際に対局中の場合に
+                // 誤って押しても、対局中止ボタンを押したのと同じ効果なので害はない）。
+                Button(onClick = {
+                    coroutineScope.launch {
+                        forceResetSession()
+                        resetToCamera()
+                    }
+                }) { Text("サーバの状態をリセットしてやり直す") }
             }
         }
     }
@@ -594,6 +609,16 @@ private suspend fun confirmGrid(onSuccess: () -> Unit, onError: (String) -> Unit
         if (response.isSuccessful) onSuccess() else onError("HTTP ${response.code()}")
     } catch (e: Exception) {
         onError(e.message ?: "通信エラー")
+    }
+}
+
+/** サーバのセッションを無条件でidleに戻す（/game/abort）。失敗しても無視——
+ * どうせこの後resetToCamera()で撮影からやり直すだけなので、通知できなくても困らない。 */
+private suspend fun forceResetSession() {
+    try {
+        RetrofitClient.shogiApiService.gameAbort()
+    } catch (e: Exception) {
+        // 無視（上記コメント参照）
     }
 }
 

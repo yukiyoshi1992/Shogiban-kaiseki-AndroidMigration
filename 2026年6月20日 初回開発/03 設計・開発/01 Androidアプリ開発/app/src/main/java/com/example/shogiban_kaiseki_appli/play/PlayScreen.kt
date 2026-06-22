@@ -56,9 +56,20 @@ import java.util.Locale
 private sealed class MoveResult {
     data class Move(val speechText: String, val moveCount: Int) : MoveResult()
     object NoChange : MoveResult()
-    // moveCountはサーバが返した「ここまでに記録済みの手数」（HTTPエラーや通信例外時はサーバの
-    // 応答が読めていないのでnull——呼び出し側はローカルに持っている直近のmoveCountで代替する）。
-    data class Error(val message: String, val moveCount: Int? = null) : MoveResult()
+    // サーバが実際にclassify_frameを実行した結果"error"を返したケース（応答は正常に届いている）。
+    // 前PJ方針通り対局を自動中止する対象はこれだけ——moveCountはサーバが返した
+    // 「ここまでに記録済みの手数」。
+    data class RecognitionError(val message: String, val moveCount: Int? = null) : MoveResult()
+    // 2026-06-22、UAT報告（撮影すると409が出る）の原因調査で追加：上記とは区別する。
+    // サーバに届く前/応答が返る前に失敗したケース（タイムアウト・接続不可・HTTPエラー等）。
+    // これは「認識した結果がエラーだった」のではなく「認識できたかどうかすら分からない」ので、
+    // 前PJの自動中止方針（認識エラーで続行不能→中止）の対象外——対局を中止せず、エラー表示の
+    // みでもう一度シャッターを押し直せるようにする。これを区別せずRecognitionErrorと同様に
+    // 自動中止していたのが今回の不具合の真因：一時的な通信不調（WiFi切れ等）で/moveが失敗すると
+    // 即座に対局を自動中止しに行くが、その「中止」自体も通信（/game/abort）なので、ネットワークが
+    // まだ不調だとそれも届かず、クライアントだけが対局を終えた扱いになりサーバはplayingのまま
+    // 残ってしまい、その後の撮影が全部409 Conflictになっていた。
+    data class NetworkError(val message: String) : MoveResult()
 }
 
 /**
@@ -139,6 +150,15 @@ fun PlayScreen(
     // で表示する——画面がこの直後に対局画面から抜けてしまうため、画面内のテキストでは
     // ユーザーが読み取れない可能性があるため。KIFは（中止ボタンと同じ`abortGame`経由なので）
     // 削除されず、記録済みの手数まではそのまま残る。
+    //
+    // 2026-06-22、上記の自動中止後に実機で再現した不具合への対応：自動中止はサーバが実際に
+    // classify_frameを動かして"error"を返した場合（MoveResult.RecognitionError）のみに限定し、
+    // 単なる通信エラー（タイムアウト・接続不可・409等、MoveResult.NetworkError）では中止しない
+    // ように区別した。原因：通信が不調な時に/moveが失敗すると、当初は区別なく即座に対局を
+    // 自動中止しに行っていたが、その「中止」自体も通信（/game/abort）なので、ネットワークが
+    // まだ不調だとそれも届かない。するとクライアントは（abortGameがonGameEndedを無条件で呼ぶ
+    // ため）対局を終えた扱いになり画面が戻るが、サーバ側のセッションはplayingのまま残ってしまい、
+    // 以後の撮影が全部409 Conflictになる、という実機報告と一致する不具合があった。
     suspend fun processFile(file: File): Boolean {
         statusMessage = if (pendingCount > 0) {
             "処理中...（あと${pendingCount}件待ち）"
@@ -156,7 +176,7 @@ fun PlayScreen(
                 statusMessage = "変化なし（駒のずれ・照明変化と判断、手は記録していません）"
                 return false
             }
-            is MoveResult.Error -> {
+            is MoveResult.RecognitionError -> {
                 playErrorTone()
                 val recordedCount = result.moveCount ?: moveCount
                 val reasonMsg = "認識エラーのため対局を中止しました（${recordedCount}手目まで記録）\n詳細: ${result.message}"
@@ -164,6 +184,13 @@ fun PlayScreen(
                 Toast.makeText(context, reasonMsg, Toast.LENGTH_LONG).show()
                 abortGame(onGameEnded)
                 return true
+            }
+            is MoveResult.NetworkError -> {
+                // 対局は中止しない（上記MoveResult.NetworkErrorのコメント参照）。
+                // 通信が復旧してから改めてシャッターを押し直せばよい。
+                playErrorTone()
+                statusMessage = "通信エラー: ${result.message}（対局は継続中です。もう一度シャッターを押してください）"
+                return false
             }
         }
     }
@@ -296,13 +323,15 @@ private suspend fun sendMove(file: File): MoveResult {
         val response = RetrofitClient.shogiApiService.move(part)
         val body = response.body()
         when {
-            !response.isSuccessful || body == null -> MoveResult.Error("HTTP ${response.code()}")
+            // HTTPレベルで失敗（409=状態不整合、その他5xx等含む）はサーバが実際にclassify_frameを
+            // 動かせてすらいないので、認識エラーとして対局を中止する対象ではない（NetworkError）。
+            !response.isSuccessful || body == null -> MoveResult.NetworkError("HTTP ${response.code()}")
             body.status == "move" -> MoveResult.Move(body.speech_text ?: "", body.move_count ?: 0)
             body.status == "nochange" -> MoveResult.NoChange
-            else -> MoveResult.Error(body.detail?.toString() ?: "認識できませんでした", body.move_count)
+            else -> MoveResult.RecognitionError(body.detail?.toString() ?: "認識できませんでした", body.move_count)
         }
     } catch (e: Exception) {
-        MoveResult.Error(e.message ?: "通信エラー")
+        MoveResult.NetworkError(e.message ?: "通信エラー")
     }
 }
 
