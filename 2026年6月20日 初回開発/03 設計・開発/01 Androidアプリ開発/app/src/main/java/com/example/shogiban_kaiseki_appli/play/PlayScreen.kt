@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.speech.tts.TextToSpeech
+import android.widget.Toast
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
@@ -55,15 +56,17 @@ import java.util.Locale
 private sealed class MoveResult {
     data class Move(val speechText: String, val moveCount: Int) : MoveResult()
     object NoChange : MoveResult()
-    data class Error(val message: String) : MoveResult()
+    // moveCountはサーバが返した「ここまでに記録済みの手数」（HTTPエラーや通信例外時はサーバの
+    // 応答が読めていないのでnull——呼び出し側はローカルに持っている直近のmoveCountで代替する）。
+    data class Error(val message: String, val moveCount: Int? = null) : MoveResult()
 }
 
 /**
  * 対局画面：カメラプレビュー常時表示、シャッター（オンスクリーンボタン or Bluetoothシャッター=
  * 音量キー、MainActivity側でフックしてregisterShutterTrigger経由でここに伝える）ごとに
- * /move を呼び指し手判定。成功時はTTSで読み上げ、認識エラー時はエラー音を鳴らして分析を
- * 中断する（撮影のし直しは行わない——2026-06-22、UAT2回目課題②によりこの方針に変更。
- * 旧仕様の「自動で1回だけ撮り直す」は過剰な追加機能だったとユーザー判断、撤回済み）。
+ * /move を呼び指し手判定。成功時はTTSで読み上げ、認識エラー時はエラー音＋ポップアップで理由を
+ * 示し、前PJ`app_streamlit.py`の方針通り対局を自動中止する（2026-06-22、UAT2回目課題⑤。
+ * 撮り直しを促すだけで止まる旧仕様は撤回済み——課題②で「撮影のし直しは不要」と確定済み）。
  *
  * 2026-06-22、初回UAT指摘により改修：①連続して撮影すると前の写真の処理待ちで次のシャッターが
  * 無視され「固まる」（isBusy中はpress自体を無視していたため、押した分の手が記録されずに
@@ -71,6 +74,8 @@ private sealed class MoveResult {
  * Channelで1件ずつ順番に処理するキュー方式に変更。シャッターを連打しても押した回数分の
  * 写真は必ず撮られ、順番に処理される（処理中も「あと何件待ち」を表示）。
  * ②「対局中止」ボタンを追加（後述）。
+ * 2026-06-22、2回目UAT課題⑤の調査で、シャッター発行自体（カメラのtakePicture呼び出し）も
+ * 連射時に並行実行されており完了順が入れ替わる余地があったため、シャッター要求も直列キュー化。
  */
 @Composable
 fun PlayScreen(
@@ -119,20 +124,22 @@ fun PlayScreen(
         return if (ok) file else null
     }
 
-    // キューから1件取り出して処理する。
-    // 2026-06-22、UAT2回目課題②により撮り直し（リトライ）を全廃：認識エラー時は即座に
-    // エラー表示・エラー音で分析を中断するだけにする（撮影のし直しは不要、というユーザーの
-    // 明示の指示。前PJ・アプリ要件にあった「自動で1回だけ撮り直す」方針は、今回の指摘により
-    // 過剰な追加機能だったと判断され撤回——必要になれば改めて開発する）。
+    // キューから1件取り出して処理する。戻り値true＝認識エラーで対局を自動中止したので、
+    // 残りのキューはもう処理しない（呼び出し側でループを止める）。
     //
-    // この撤回は同時に②で報告された「連射すると処理が混乱する」不具合の真因も解消する：
-    // 旧実装はエラー時、キューの先頭処理中にその場で新しい撮影を割り込ませて即座に処理していた
-    // （`captureToFile`→再帰`processFile`）。これはキューに後続の写真（連射で既に積まれている分）
-    // が残っている状態では、本来の順序より先に「今の」実際の盤面を撮ってしまい、キュー内の
-    // 古い写真との比較がズレて余計なエラーを誘発する一因になっていた（順序が保証された
-    // キュー処理の前提を、割り込みの再撮影が破っていた）。撮り直し自体をやめたことで、
-    // キューは常に「撮影された順番のまま、1件ずつ」処理される構造になり、この混乱は起きない。
-    suspend fun processFile(file: File) {
+    // 2026-06-22、UAT2回目課題②により撮り直し（リトライ）を全廃：認識エラー時に「その場で
+    // 新しい撮影を割り込ませて先に処理する」旧実装が、連射でキューに後続の写真が残っている
+    // 状態だと順序を乱し、それ自体が誤エラーの一因になっていた（キュー処理の「撮影順を保つ」
+    // 前提を、割り込みの再撮影が破っていたため）。撮り直し自体をやめたことでこの混乱は解消。
+    //
+    // 2026-06-22、UAT2回目課題⑤：認識エラー時、前PJ`app_streamlit.py`の方針
+    // （画面要件No.6「認識エラーで続行不能→対局中止と同じ動作を自動実行」、
+    // 誤ったKIFを生成するより諦める）を踏襲し、撮り直しを促すだけで止まらず、対局を
+    // 自動的に中止する。中止理由（サーバの判定詳細＋ここまでの手数）はトースト（ポップアップ）
+    // で表示する——画面がこの直後に対局画面から抜けてしまうため、画面内のテキストでは
+    // ユーザーが読み取れない可能性があるため。KIFは（中止ボタンと同じ`abortGame`経由なので）
+    // 削除されず、記録済みの手数まではそのまま残る。
+    suspend fun processFile(file: File): Boolean {
         statusMessage = if (pendingCount > 0) {
             "処理中...（あと${pendingCount}件待ち）"
         } else {
@@ -143,38 +150,66 @@ fun PlayScreen(
                 moveCount = result.moveCount
                 statusMessage = "${result.moveCount}手目: ${result.speechText}"
                 if (ttsEnabled) tts?.speak(result.speechText, TextToSpeech.QUEUE_ADD, null, null)
+                return false
             }
             is MoveResult.NoChange -> {
                 statusMessage = "変化なし（駒のずれ・照明変化と判断、手は記録していません）"
+                return false
             }
             is MoveResult.Error -> {
                 playErrorTone()
-                statusMessage = "認識エラー: ${result.message}（分析を中断しました。もう一度シャッターを押してください）"
+                val recordedCount = result.moveCount ?: moveCount
+                val reasonMsg = "認識エラーのため対局を中止しました（${recordedCount}手目まで記録）\n詳細: ${result.message}"
+                statusMessage = reasonMsg
+                Toast.makeText(context, reasonMsg, Toast.LENGTH_LONG).show()
+                abortGame(onGameEnded)
+                return true
             }
         }
     }
 
     // キューを順番に処理する常駐コルーチン。画面が表示されている間ずっと1つだけ動く。
+    // 認識エラーで対局が自動中止された場合はそこで止め、キューに残っている分（連射で
+    // 既に積まれていた古い写真）は処理しない（対局がもう存在しないため）。
     LaunchedEffect(captureQueue) {
         for (file in captureQueue) {
             isProcessing = true
-            processFile(file)
+            val aborted = processFile(file)
             pendingCount = (pendingCount - 1).coerceAtLeast(0)
             isProcessing = false
+            if (aborted) {
+                pendingCount = 0
+                break
+            }
         }
     }
 
-    fun triggerCapture() {
-        coroutineScope.launch {
+    // シャッター（連打含む）を順番に処理する常駐コルーチン。
+    // 2026-06-22、UAT2回目課題⑤の調査で判明：以前はシャッター1回ごとに新しいコルーチンを
+    // 独立起動していたため（`coroutineScope.launch { ...captureToFile...captureQueue.trySend... }`）、
+    // 連射時に複数の撮影が並行して走り、CameraXへのtakePicture発行順・完了順が押した順と
+    // 入れ替わる余地があった（撮影完了後にキューへ送る設計なので、後で押した分が先に完了すれば
+    // 先にキューに入り、結果的にサーバ側の処理順が実際の手順と食い違う）。これは「撮影の
+    // タイミングに誤りがある」場合の一種で、上記⑤の自動中止で必ず救済できるが、そもそも
+    // 起きないようにする方が良いため、シャッター要求自体を1件ずつ直列処理するキューに変更した
+    // （カメラ撮影自体は数百msで終わるので、直列化してもシャッターが固まる印象には繋がらない
+    // ——固まって見えた初回UATの不具合は、ネットワーク/認識処理待ちが原因で、これとは別）。
+    val triggerQueue = remember { Channel<Unit>(Channel.UNLIMITED) }
+    LaunchedEffect(triggerQueue) {
+        for (unit in triggerQueue) {
             playShutterSound()
             val file = captureToFile("move")
             if (file == null) {
                 statusMessage = "カメラ未準備のため撮影できませんでした"
-                return@launch
+                continue
             }
             pendingCount += 1
             captureQueue.trySend(file)
         }
+    }
+
+    fun triggerCapture() {
+        triggerQueue.trySend(Unit)
     }
 
     LaunchedEffect(Unit) {
@@ -264,7 +299,7 @@ private suspend fun sendMove(file: File): MoveResult {
             !response.isSuccessful || body == null -> MoveResult.Error("HTTP ${response.code()}")
             body.status == "move" -> MoveResult.Move(body.speech_text ?: "", body.move_count ?: 0)
             body.status == "nochange" -> MoveResult.NoChange
-            else -> MoveResult.Error(body.detail?.toString() ?: "認識できませんでした")
+            else -> MoveResult.Error(body.detail?.toString() ?: "認識できませんでした", body.move_count)
         }
     } catch (e: Exception) {
         MoveResult.Error(e.message ?: "通信エラー")

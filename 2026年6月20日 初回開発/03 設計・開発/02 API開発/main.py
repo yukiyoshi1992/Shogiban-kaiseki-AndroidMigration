@@ -228,8 +228,15 @@ async def calibration_confirm_grid():
 @app.post("/move")
 async def post_move(file: UploadFile):
     """1手分の写真を受け取り、classify_frameで指し手を判定する。
-    成功時はKIFに1行追記し、読み上げ用テキストを返す。失敗時はリトライ判断をアプリ側に委ねる
-    （アプリ要件: エラー時は自動で1回だけ撮り直し、それでも失敗ならエラー音で諦める）。
+    成功時はKIFに1行追記し、読み上げ用テキストを返す。
+
+    失敗時の方針（2026-06-22、2回目UAT課題⑤で確定。前PJ`app_streamlit.py`の
+    「画面要件No.6: 認識エラーで続行不能→対局中止と同じ動作を自動実行」を踏襲）：
+    撮影のし直し（リトライ）は行わず、アプリ側が`/game/abort`相当の処理を自動実行する
+    （誤ったKIFを生成するより諦める方針）。サーバはこの自動中止の判断自体は行わない
+    （セッション状態は維持したまま"error"を返すだけ）——アプリ側が受け取って中止する。
+    ここまでに記録済みの手数（move_count）も合わせて返すので、アプリ側は前PJの
+    「n手目まで記録」のような中断理由表示に使える。
     """
     img = _decode_image(await file.read())
     if img is None:
@@ -265,7 +272,12 @@ async def post_move(file: UploadFile):
     if status == "nochange":
         return {"status": "nochange"}
 
-    return JSONResponse(status_code=200, content={"status": "error", "detail": payload})
+    # 2回目UAT課題⑤：前PJ（Streamlit版）の「認識エラー時は対局中止と同じ動作を自動実行」
+    # 方針を踏襲するため、アプリ側が中断理由をポップアップ表示できるよう、ここまでに
+    # 記録済みの手数も合わせて返す。
+    return JSONResponse(status_code=200, content={
+        "status": "error", "detail": payload, "move_count": len(session.moves_usi)
+    })
 
 
 @app.post("/game/end")
