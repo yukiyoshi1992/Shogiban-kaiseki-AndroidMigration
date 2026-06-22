@@ -240,6 +240,6 @@ for i, w in enumerate(widths, start=1):
 ws.freeze_panes = "A2"
 ws.auto_filter.ref = f"A1:{get_column_letter(len(HEADER))}{ws.max_row}"
 
-out_path = "UATテストシナリオ.xlsx"
+out_path = "総合テストシナリオ.xlsx"
 wb.save(out_path)
 print("saved:", out_path, "rows:", len(ROWS))
