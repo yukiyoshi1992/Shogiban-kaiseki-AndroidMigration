@@ -23,9 +23,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -116,6 +118,15 @@ fun PlayScreen(
     var ttsEnabled by remember { mutableStateOf(true) }
     val playShutterSound = rememberShutterSound()
     val captureQueue = remember { Channel<File>(Channel.UNLIMITED) }
+    // 2026-06-22、4回目UAT課題⑤：終局ボタンを押した時点でまだキューに未処理の撮影が残っている
+    // 場合、即座に/game/endを呼ぶとサーバ側の状態が即idleに戻ってしまい、後から処理が終わって
+    // 送られる/moveが全部弾かれて記録漏れになっていた（終局ボタンを押した瞬間までに分析が
+    // 終わっていた内容でKIFが確定してしまう）。endRequestedを立てて、キューが空になってから
+    // 実際にendGame()を呼ぶように変更（下のLaunchedEffect(captureQueue)参照）。
+    var endRequested by remember { mutableStateOf(false) }
+    // 2026-06-22、4回目UAT課題③：終局・中止ボタンの誤操作防止用の確認ダイヤログ表示フラグ。
+    var showEndConfirm by remember { mutableStateOf(false) }
+    var showAbortConfirm by remember { mutableStateOf(false) }
 
     // カメラのシャッター（CameraXのtakePicture）を待つだけのsuspend関数。
     // 撮影自体はネットワークを待たず即座に終わるので、ここではキューに積まない
@@ -198,6 +209,7 @@ fun PlayScreen(
             }
             is MoveResult.RecognitionError -> {
                 playErrorTone()
+                speakErrorAlert(tts)
                 val recordedCount = finalResult.moveCount ?: moveCount
                 val reasonMsg = "認識エラーのため対局を中止しました（${recordedCount}手目まで記録）\n詳細: ${finalResult.message}"
                 statusMessage = reasonMsg
@@ -208,6 +220,7 @@ fun PlayScreen(
             is MoveResult.NetworkError -> {
                 // 再試行しても届かなかった＝記録不能。RecognitionErrorと同様に対局を自動中止する。
                 playErrorTone()
+                speakErrorAlert(tts)
                 val reasonMsg = "通信エラーのため対局を中止しました（${moveCount}手目まで記録）\n詳細: ${finalResult.message}"
                 statusMessage = reasonMsg
                 Toast.makeText(context, reasonMsg, Toast.LENGTH_LONG).show()
@@ -228,7 +241,14 @@ fun PlayScreen(
             isProcessing = false
             if (aborted) {
                 pendingCount = 0
+                endRequested = false
                 break
+            }
+            // 4回目UAT課題⑤：終局待ちで、ちょうどキューが空になった瞬間に確定させる。
+            if (endRequested && pendingCount == 0) {
+                endRequested = false
+                statusMessage = "対局終了処理中..."
+                endGame(onGameEnded)
             }
         }
     }
@@ -314,21 +334,59 @@ fun PlayScreen(
                     shape = CircleShape,
                     onClick = { triggerCapture() }
                 ) {}
-                Button(onClick = {
-                    coroutineScope.launch { endGame(onGameEnded) }
-                }) { Text("終局") }
+                // 2026-06-22、4回目UAT課題③：誤操作防止のため、即座に実行せず確認ダイヤログを
+                // 経由する（下のAlertDialog参照）。
+                Button(onClick = { showEndConfirm = true }) { Text("終局") }
                 // 2026-06-22、UAT課題①：テスト時に対局を中断して最初からやり直したい場面が多く
                 // 「終局」しかないと使いづらいという指摘への対応。「終局」は/move側の記録が
                 // 正規に終わったことを意味するのに対し、「中止」はテスト的な強制リセットなので
                 // サーバへの通知が失敗しても（ネットワーク不調等）必ず画面は戻す——でないと
                 // 「中止すら効かない」というさらに使いづらい状態になってしまうため。
-                Button(onClick = {
-                    coroutineScope.launch { abortGame(onGameEnded) }
-                }) { Text("中止") }
+                Button(onClick = { showAbortConfirm = true }) { Text("中止") }
                 Button(onClick = { ttsEnabled = !ttsEnabled }) {
                     Text(if (ttsEnabled) "読み上げON" else "読み上げOFF")
                 }
             }
+        }
+
+        if (showEndConfirm) {
+            AlertDialog(
+                onDismissRequest = { showEndConfirm = false },
+                title = { Text("終局しますか？") },
+                text = { Text("対局を終了し、ここまでの記録でKIFを確定します。") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showEndConfirm = false
+                        // 4回目UAT課題⑤：未処理の撮影が残っている間は即座に終局せず、
+                        // キューが空になるのを待ってから確定する（上のLaunchedEffect(captureQueue)参照）。
+                        if (pendingCount > 0 || isProcessing) {
+                            endRequested = true
+                            statusMessage = "対局終了：処理中の撮影が完了するのを待っています...（あと${pendingCount}件）"
+                        } else {
+                            coroutineScope.launch { endGame(onGameEnded) }
+                        }
+                    }) { Text("終局する") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showEndConfirm = false }) { Text("キャンセル") }
+                }
+            )
+        }
+        if (showAbortConfirm) {
+            AlertDialog(
+                onDismissRequest = { showAbortConfirm = false },
+                title = { Text("対局を中止しますか？") },
+                text = { Text("ここまでの記録は残りますが、対局は中断されます。") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showAbortConfirm = false
+                        coroutineScope.launch { abortGame(onGameEnded) }
+                    }) { Text("中止する") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showAbortConfirm = false }) { Text("キャンセル") }
+                }
+            )
         }
     }
 }
@@ -381,4 +439,13 @@ private suspend fun abortGame(onGameEnded: () -> Unit, reason: String = "user") 
 private fun playErrorTone() {
     val tg = ToneGenerator(AudioManager.STREAM_NOTIFICATION, ToneGenerator.MAX_VOLUME)
     tg.startTone(ToneGenerator.TONE_PROP_BEEP, 400)
+}
+
+// 2026-06-22、4回目UAT課題①：エラー音だけでは「鳴っているのか気づかない/小さくて聞こえない」
+// との指摘への対応。エラー発生時は必ず音声で「エラーが起きました」と読み上げる——
+// ttsEnabled（読み上げON/OFF）の対象は通常の指し手読み上げのみで、エラー通知はそれとは別の
+// 常時オンの通知チャンネルとして扱う（読み上げOFF中でも気づけないと困るため）。
+// QUEUE_FLUSHで他の読み上げ中の発話より優先して即座に再生する。
+private fun speakErrorAlert(tts: TextToSpeech?) {
+    tts?.speak("エラーが起きました", TextToSpeech.QUEUE_FLUSH, null, null)
 }

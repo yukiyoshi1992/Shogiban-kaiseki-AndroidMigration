@@ -96,12 +96,14 @@ fun GameListScreen(modifier: Modifier = Modifier, onBack: () -> Unit) {
                 context.startActivity(Intent.createChooser(intent, "KIFを共有"))
             }, modifier = Modifier.fillMaxWidth()) { Text("共有（LINE/メール）") }
             // 2026-06-22、KENTO連携用：KENTO自体へのAPI連携は見送り、コピー→KENTOサイトで
-            // 貼り付けという手動連携にするとの指示を受けて追加。
+            // 貼り付けという手動連携にするとの指示を受けて追加。ボタン名称は4回目UAT課題②で
+            // 「コピー（KENTO用）」→「コピー（分析Tool貼付用）」に変更（KENTO以外の分析ツールにも
+            // 貼り付けて使う想定であることが分かりやすいように）。
             Button(onClick = {
                 val clipboard = context.getSystemService(ClipboardManager::class.java)
                 clipboard.setPrimaryClip(ClipData.newPlainText("KIF", selectedKif))
                 Toast.makeText(context, "棋譜をクリップボードにコピーしました", Toast.LENGTH_SHORT).show()
-            }, modifier = Modifier.fillMaxWidth()) { Text("コピー（KENTO用）") }
+            }, modifier = Modifier.fillMaxWidth()) { Text("コピー（分析Tool貼付用）") }
         }
         return
     }
