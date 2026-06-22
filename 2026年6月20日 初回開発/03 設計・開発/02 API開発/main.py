@@ -157,7 +157,13 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
 @app.post("/calibration/confirm")
 async def calibration_confirm():
     """人間が認識結果を確認OKした際に呼ぶ。対局開始（盤=将棋の初期配置）。"""
+    # 2026-06-22、タイムアウト調査用：赤丸自動検出が成功した直後にだけクライアントが
+    # このエンドポイントを追加で呼ぶ（`/calibration/photo`がmatches_initial=trueを返した時のみ
+    # `proceedToConfirm()`経由で呼ばれる）ため、ここが疑わしいというユーザー指摘を受けて計測。
+    t_start = time.perf_counter()
+    _log("[calibration/confirm] request received")
     if session.state != GameState.READY or session.pending_calibration is None:
+        _log(f"[calibration/confirm] 409 rejected, state={session.state.value}")
         raise HTTPException(409, "no pending calibration to confirm")
 
     session.calib_matrix = session.pending_calibration.matrix
@@ -166,8 +172,12 @@ async def calibration_confirm():
     session.moves_usi = []
     session.game_id = f"game_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     session.kif_path = RUNTIME_GAMES_DIR / f"{session.game_id}.kif"
+    t_before_write = time.perf_counter()
     session.kif_path.write_text("手数----指手---------消費時間--\n", encoding="utf-8")
+    t_end = time.perf_counter()
     session.state = GameState.PLAYING
+    _log(f"[calibration/confirm] pre_write={t_before_write-t_start:.2f}s kif_write={t_end-t_before_write:.2f}s "
+         f"total={t_end-t_start:.2f}s -> playing (responding now)")
     return {"status": "playing", "game_id": session.game_id}
 
 
