@@ -712,7 +712,11 @@ private fun GridConfirmStep(
             } else {
                 "緑の線が盤のマスに正しく重なっているか確認してください"
             },
-            modifier = Modifier.padding(12.dp)
+            // 6回目UAT課題③：CalibrationScreenはMainActivity側でBoxに重ねられ、画面右上に
+            // 「過去の対局」ボタンが常時表示される（ShogiAppFlow参照）。このTextが画面上端から
+            // 始まると不一致マス数の文言がそのボタンと重なって読めなくなっていたため、
+            // ボタンの占有高さを避けるだけの上部余白を確保する。
+            modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 64.dp, bottom = 12.dp)
         )
         if (overlayBitmap != null) {
             Image(

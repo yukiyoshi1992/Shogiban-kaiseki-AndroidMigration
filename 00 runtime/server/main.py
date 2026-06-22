@@ -75,6 +75,19 @@ def _strip_kif_prefix(stem: str) -> str:
     return re.sub(r"^【[^】]*】", "", stem)
 
 
+def _kif_chronological_key(stem: str) -> str:
+    """一覧の並び順用：ファイル名から数字（日付＋時刻）だけを取り出したキーを返す。
+
+    6回目UAT課題④：list_games()は以前、生のファイル名（先頭に【対局中止】等の状態
+    プレフィックスを含む）をそのままソートキーにしていたため、文字コード上プレフィックス
+    文字列ごとにグルーピングされてしまい、対局完了・対局中止が時系列を無視して別々の
+    ブロックにまとまって表示されていた。プレフィックスも"game_"等の英字部分もすべて
+    数字以外として除去すれば、新形式（yyyyMMdd_hh-mm）・旧形式（game_YYYYMMDD_HHMMSS）
+    どちらも日付＋時刻の数字列だけが残り、文字列比較がそのまま時系列比較になる。
+    """
+    return re.sub(r"\D", "", stem)
+
+
 def _rename_kif(new_prefix: str) -> None:
     """対局中のKIFファイルの状態プレフィックスを付け替える。/game/abortはどの状態からでも
     無条件で呼べる設計のため、対局がまだ始まっていない（kif_path未設定）場合は何もしない。
@@ -476,10 +489,17 @@ async def list_games(date: str | None = None):
     （新形式・旧形式game_YYYYMMDD_HHMMSSの両方に対応）。
 
     5回目UAT課題④：`resumable`（終局していない棋譜＝再開対象になるか）を追加。
+    6回目UAT課題④：一覧の並び順を、ファイル名の生の文字列ではなく日時の数字部分
+    （`_kif_chronological_key`）でソートするよう変更——以前は状態プレフィックスの
+    文字コードでグルーピングされ、対局中止/完了が時系列を無視してブロック化していた。
     """
     date_filter = date.replace("-", "") if date else None
     games = []
-    for path in sorted(RUNTIME_GAMES_DIR.glob("*.kif"), reverse=True):
+    for path in sorted(
+        RUNTIME_GAMES_DIR.glob("*.kif"),
+        key=lambda p: _kif_chronological_key(p.stem),
+        reverse=True,
+    ):
         m = re.search(r"\d{8}", path.stem)
         date_part = m.group(0) if m else ""
         if date_filter and date_part != date_filter:
