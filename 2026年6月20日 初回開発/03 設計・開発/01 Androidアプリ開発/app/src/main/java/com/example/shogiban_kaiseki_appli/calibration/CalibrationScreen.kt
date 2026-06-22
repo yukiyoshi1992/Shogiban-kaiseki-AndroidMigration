@@ -71,13 +71,18 @@ private data class PixelSize(val width: Int, val height: Int)
 /**
  * キャリブレーション画面：①撮影 → ②まず前PJと同じ赤丸4個の自動検出をサーバに依頼
  * → 検出できなければ③盤の四隅4点タップ（ドラッグ＋拡大ルーペで微調整可能）→サーバへ送信
- * → ④認識結果が将棋の初期配置と一致するかをサーバが自動判定し、一致すればそのまま対局開始。
- * 不一致なら①からやり直し（個別マス補正はしない、確定済み方針）。
+ * → ④認識結果が将棋の初期配置と一致するかをサーバが自動判定。一致（自動検出成功）または
+ * 手動タップ（前PJ方針通り常に無条件採用）のいずれも、対局開始の前に緑グリッド線オーバーレイ
+ * での目視確認を挟む（OK→対局開始、NG→盤の四隅タップへ）。自動検出が初期配置と不一致なら
+ * 目視確認すら挟まず①からやり直し（個別マス補正はしない、確定済み方針）。
  * 2026-06-21、実機テストでのユーザー指摘により2点変更：
  *   - 「人間が9x9を目視確認してOKを押す」フローから「サーバが自動判定する」フローに変更。
  *   - 手動4隅タップを毎回先に行う方式から、前PJと同じ「まず赤丸自動検出、失敗時のみ人間が
  *     タップ」の二段構成に変更（赤丸検出・盤面分析ロジック自体は前PJのものをそのまま移植、
  *     変更していない）。
+ * 2026-06-22、2回目UAT課題③：自動検出成功時も「タップ精度（透視変換が合っているか）」の
+ * 目視確認（緑グリッド線）を挟むよう変更（盤面認識結果の一致確認だけでは透視変換自体の
+ * ズレを検出できないため、手動タップと同じ確認画面に統一）。
  */
 @Composable
 fun CalibrationScreen(
@@ -106,10 +111,13 @@ fun CalibrationScreen(
 
     // 自動検出（赤丸）モード：失敗・不一致いずれも人間の4隅タップにフォールバックする
     // （前PJ run_realtime.py と同じ「エラーが出たら即・人間が直す」方針）。
-    // 2026-06-22、自動検出が初期配置と一致した場合、サーバが/calibration/photo 1回の
-    // レスポンス内で対局開始まで完了させるようになった（旧/calibration/confirmへの
-    // 2回目のリクエストを統合・廃止——その2回目が実機で断続的にタイムアウトする事象が
-    // 確認されたため）。onMatchはもう追加の通信をせず、直接onCalibrated()を呼ぶ。
+    // 2026-06-22、2回目UAT課題③により変更：自動検出が初期配置と一致した場合も、
+    // 手動タップと同じグリッド確認画面（onPendingConfirm）を経由するようになった
+    // （サーバが対局開始までその場で完了させていたのは、盤面認識結果の一致確認だけで、
+    // 4隅タップ自体の精度——透視変換が盤に正しく合っているか——は確認していなかったため）。
+    // onMatch/onMismatchはこの経路では呼ばれない想定（サーバは自動一致時は必ず
+    // pending_confirmを返す）が、念のため残しておく：onMatchはonCalibrated()を直接呼び、
+    // onMismatchは従来通り手動タップへフォールバックする。
     fun handleAutoResult(file: File) {
         coroutineScope.launch {
             submitCalibration(file, points = null,
@@ -122,7 +130,11 @@ fun CalibrationScreen(
                     tappingHint = "赤丸を検出できませんでした。盤の四隅をタップしてください"
                     phase = CalibPhase.TAPPING
                 },
-                onPendingConfirm = { /* 自動検出モードでは発生しない */ },
+                onPendingConfirm = { base64 ->
+                    val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
+                    gridOverlayBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    phase = CalibPhase.GRID_CONFIRM
+                },
                 onError = { msg -> errorMessage = msg; phase = CalibPhase.ERROR }
             )
         }
@@ -207,7 +219,11 @@ fun CalibrationScreen(
             overlayBitmap = gridOverlayBitmap,
             onOk = { handleGridConfirmOk() },
             onRetry = {
+                // 2026-06-22、2回目UAT課題③：自動検出成功後のグリッド確認でNGだった場合も
+                // ここを経由する（自動検出時はそもそも盤の四隅をタップしていないので、
+                // 同じ撮影済み写真に対して初めて手動タップを行うことになる）。
                 tapPoints = emptyList()
+                tappingHint = "グリッドが盤に正しく重なっていませんでした。盤の四隅をタップしてください"
                 phase = CalibPhase.TAPPING
             }
         )
@@ -582,9 +598,10 @@ private suspend fun confirmGrid(onSuccess: () -> Unit, onError: (String) -> Unit
 }
 
 /**
- * UAT課題②：手動タップ後、サーバが返した緑グリッド線オーバーレイ画像を表示し、
- * 4隅タップの精度（透視変換が盤に正しく合っているか）を人間が目視確認する画面。
- * OKなら対局開始、NGなら盤の四隅タップへ戻る（同じ撮影写真への再タップ、撮り直しは不要）。
+ * UAT課題②（手動タップ後）・2回目UAT課題③（自動検出成功後）共通：サーバが返した
+ * 緑グリッド線オーバーレイ画像を表示し、4隅の精度（透視変換が盤に正しく合っているか）を
+ * 人間が目視確認する画面。OKなら対局開始、NGなら盤の四隅タップへ戻る
+ * （同じ撮影写真への再タップ、撮り直しは不要）。
  */
 @Composable
 private fun GridConfirmStep(

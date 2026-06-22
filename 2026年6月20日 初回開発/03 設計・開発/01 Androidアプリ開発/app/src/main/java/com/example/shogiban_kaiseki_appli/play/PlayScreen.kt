@@ -61,10 +61,11 @@ private sealed class MoveResult {
 /**
  * 対局画面：カメラプレビュー常時表示、シャッター（オンスクリーンボタン or Bluetoothシャッター=
  * 音量キー、MainActivity側でフックしてregisterShutterTrigger経由でここに伝える）ごとに
- * /move を呼び指し手判定。成功時はTTSで読み上げ、失敗時は1回だけ自動で撮り直し、それでも
- * 失敗ならエラー音を鳴らして諦める（アプリ要件のエラー時方針）。
+ * /move を呼び指し手判定。成功時はTTSで読み上げ、認識エラー時はエラー音を鳴らして分析を
+ * 中断する（撮影のし直しは行わない——2026-06-22、UAT2回目課題②によりこの方針に変更。
+ * 旧仕様の「自動で1回だけ撮り直す」は過剰な追加機能だったとユーザー判断、撤回済み）。
  *
- * 2026-06-22、UAT指摘により改修：①連続して撮影すると前の写真の処理待ちで次のシャッターが
+ * 2026-06-22、初回UAT指摘により改修：①連続して撮影すると前の写真の処理待ちで次のシャッターが
  * 無視され「固まる」（isBusy中はpress自体を無視していたため、押した分の手が記録されずに
  * 消えていた）→ 撮影自体（カメラのシャッター）は常に即座に行い、サーバへの送信・判定は
  * Channelで1件ずつ順番に処理するキュー方式に変更。シャッターを連打しても押した回数分の
@@ -88,6 +89,9 @@ fun PlayScreen(
     var isProcessing by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf("対局中。シャッターを押すと1手撮影します。") }
     var moveCount by remember { mutableStateOf(0) }
+    // 2026-06-22、2回目UAT課題④：読み上げON/OFF切り替え。OFF中もKIF記録・画面表示は
+    // 通常通り続ける（読み上げ（TTSのspeak呼び出し）だけを止める）。
+    var ttsEnabled by remember { mutableStateOf(true) }
     val playShutterSound = rememberShutterSound()
     val captureQueue = remember { Channel<File>(Channel.UNLIMITED) }
 
@@ -115,13 +119,21 @@ fun PlayScreen(
         return if (ok) file else null
     }
 
-    // キューから1件取り出して処理する。エラー時のみ「直近の盤面を撮り直して1回だけリトライ」
-    // する（キューに後続の写真が既に並んでいても、リトライは盤面の現状確認が目的なので
-    // そのまま即座に撮り直す。前PJ・アプリ要件どおり「リトライ1回→エラーで諦める」方針は不変）。
-    suspend fun processFile(file: File, isRetry: Boolean = false) {
-        statusMessage = if (isRetry) {
-            "もう一度撮影しています..."
-        } else if (pendingCount > 0) {
+    // キューから1件取り出して処理する。
+    // 2026-06-22、UAT2回目課題②により撮り直し（リトライ）を全廃：認識エラー時は即座に
+    // エラー表示・エラー音で分析を中断するだけにする（撮影のし直しは不要、というユーザーの
+    // 明示の指示。前PJ・アプリ要件にあった「自動で1回だけ撮り直す」方針は、今回の指摘により
+    // 過剰な追加機能だったと判断され撤回——必要になれば改めて開発する）。
+    //
+    // この撤回は同時に②で報告された「連射すると処理が混乱する」不具合の真因も解消する：
+    // 旧実装はエラー時、キューの先頭処理中にその場で新しい撮影を割り込ませて即座に処理していた
+    // （`captureToFile`→再帰`processFile`）。これはキューに後続の写真（連射で既に積まれている分）
+    // が残っている状態では、本来の順序より先に「今の」実際の盤面を撮ってしまい、キュー内の
+    // 古い写真との比較がズレて余計なエラーを誘発する一因になっていた（順序が保証された
+    // キュー処理の前提を、割り込みの再撮影が破っていた）。撮り直し自体をやめたことで、
+    // キューは常に「撮影された順番のまま、1件ずつ」処理される構造になり、この混乱は起きない。
+    suspend fun processFile(file: File) {
+        statusMessage = if (pendingCount > 0) {
             "処理中...（あと${pendingCount}件待ち）"
         } else {
             "処理中..."
@@ -130,25 +142,14 @@ fun PlayScreen(
             is MoveResult.Move -> {
                 moveCount = result.moveCount
                 statusMessage = "${result.moveCount}手目: ${result.speechText}"
-                tts?.speak(result.speechText, TextToSpeech.QUEUE_ADD, null, null)
+                if (ttsEnabled) tts?.speak(result.speechText, TextToSpeech.QUEUE_ADD, null, null)
             }
             is MoveResult.NoChange -> {
                 statusMessage = "変化なし（駒のずれ・照明変化と判断、手は記録していません）"
             }
             is MoveResult.Error -> {
-                if (!isRetry) {
-                    tts?.speak("もう一度撮影してください", TextToSpeech.QUEUE_ADD, null, null)
-                    val retryFile = captureToFile("move_retry")
-                    if (retryFile != null) {
-                        processFile(retryFile, isRetry = true)
-                    } else {
-                        playErrorTone()
-                        statusMessage = "カメラ未準備のため撮り直せませんでした"
-                    }
-                } else {
-                    playErrorTone()
-                    statusMessage = "認識エラー: ${result.message}（もう一度シャッターを押してください）"
-                }
+                playErrorTone()
+                statusMessage = "認識エラー: ${result.message}（分析を中断しました。もう一度シャッターを押してください）"
             }
         }
     }
@@ -240,6 +241,9 @@ fun PlayScreen(
                 Button(onClick = {
                     coroutineScope.launch { abortGame(onGameEnded) }
                 }) { Text("中止") }
+                Button(onClick = { ttsEnabled = !ttsEnabled }) {
+                    Text(if (ttsEnabled) "読み上げON" else "読み上げOFF")
+                }
             }
         }
     }

@@ -5,12 +5,14 @@
 
 エンドポイント構成はアーキテクチャ検討.md 3節の案がベースだが、2026-06-22に
 /calibration/confirmは廃止・統合済み（旧人間確認UIの残骸だったため）。代わりに
-手動タップ時専用の/calibration/confirm_gridを追加（UAT課題②、下記参照）:
+グリッド確認専用の/calibration/confirm_gridを追加（UAT課題②、下記参照）:
   POST /calibration/photo        キャリブレーション写真（自動検出 or 4隅タップ）→ 認識結果。
-                                  自動検出が初期配置と一致、または4隅タップ自体は
-                                  そのリクエスト内で対局開始まで完了する。4隅タップの場合のみ
-                                  対局開始の前に、グリッド線重畫画像（緑線）を返し人間の
-                                  目視確認を挟む（status="pending_confirm"）。
+                                  「採用される可能性のある」キャリブレーション
+                                  （4隅タップは常に、自動検出は初期配置と一致した場合のみ）は、
+                                  対局開始の前にグリッド線重畫画像（緑線）を返し、人間が目視確認
+                                  する（status="pending_confirm"。2回目UAT課題③で自動検出側にも
+                                  適用範囲を拡大）。自動検出が初期配置と不一致の場合は人間の
+                                  手動タップへフォールバックする（status="ready"、対局開始もしない）。
   POST /calibration/confirm_grid 上記の目視確認でOKだった場合のみ呼ぶ→対局開始。
   POST /move                     1手分の写真 → classify_frameで判定 → KIF追記+読み上げテキスト
   POST /game/end                 終局通知 → KIF確定、状態をidleに戻す
@@ -103,17 +105,20 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     同じ写真に対して盤の4隅座標を添えてこのエンドポイントを再度呼ぶ（人間のフォールバック）。
     pointsを指定した場合は常にその4点座標（JSON配列 "[[x1,y1],...,[x4,y4]]"、順不同）を使う。
 
-    対局開始の判断（2026-06-22、旧/calibration/confirmを統合）：
-    手動タップ（points指定）は前PJの方針通り常に無条件採用、自動検出は初期配置と
-    完全一致した場合のみ、その場でstate→playingにして対局を開始する
-    （status="playing"）。自動検出が不一致の場合は対局を開始せずstatus="ready"を返し、
-    idleに留まる（アプリ側は人間の手動タップへフォールバックする）。
+    対局開始の判断（2026-06-22、旧/calibration/confirmを統合。2回目UAT課題③で範囲拡大）：
+    手動タップ（points指定）・自動検出が初期配置と完全一致した場合は、いずれも
+    「採用される可能性のあるキャリブレーション」として人間にグリッド線確認をさせる
+    （status="pending_confirm"。対局開始は/calibration/confirm_gridを待つ）。
+    自動検出が不一致の場合は対局を開始せずstatus="ready"を返し、idleに留まる
+    （アプリ側は人間の手動タップへフォールバックする）。
     旧設計では「9x9を人間が目視確認してOKを押す」ための別エンドポイント
     （/calibration/confirm）への2回目のリクエストが必要だったが、その人間確認UIは
     自動判定（matches_initial）に置き換えられて廃止済みで、2回目のリクエストに
     人間の判断は何も介在しなくなっていた。かつこの2回目のリクエストが実機で
     断続的にタイムアウトする事象が確認されたため、両エンドポイントを統合し
-    2回目の通信自体をなくした。
+    2回目の通信自体をなくした。UAT課題②でグリッド確認（タップ精度の目視確認）として
+    2回目の通信が復活したが、今度は人間の判断が実際に介在するので同種のタイムアウト
+    再発リスクは小さいと判断（RetrofitClientのConnectionPool設定も対策済み）。
     """
     t_start = time.perf_counter()
     _log(f"[calibration/photo] request received, mode={'auto' if points is None else 'manual'}")
@@ -157,14 +162,20 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
     t_predict = time.perf_counter()
     mismatches = recognition.compare_to_initial(recognized)
 
-    if points is not None:
-        # 2026-06-22、UAT課題②：手動タップは対局をすぐ開始せず、グリッド線オーバーレイ
-        # （前PJ save_grid_overlay同様の緑線）を人間が目視確認してからにする
-        # （4隅タップ自体の精度——透視変換が盤に正しく合っているか——の確認。
-        # 盤面認識結果の確認ではないので、自動検出側のmatches_initial判定とは独立）。
-        session.pending_manual_matrix = matrix
+    # 「採用される可能性のあるキャリブレーション」はpending_confirm（グリッド線オーバーレイを
+    # 返し、人間の目視確認後に/calibration/confirm_gridで対局開始）に進む：
+    # - 手動タップ（points指定）は常に（前PJ方針通り無条件採用、タップ精度の確認のみ挟む）
+    # - 自動検出は初期配置と完全一致した場合のみ（2026-06-22、2回目UAT課題③で追加。
+    #   従来は自動検出の一致判定＝盤面認識の正しさの確認だけで対局を即時開始していたが、
+    #   それは「4隅タップ自体の精度（透視変換が盤に正しく合っているか）」の確認ではないため、
+    #   手動タップと同じグリッド確認をくぐらせるよう統一した）。
+    # 自動検出が初期配置と不一致の場合のみpending_confirmに進まず、ready（idle留まり、
+    # 人間の手動タップへフォールバック）のまま。
+    pending = points is not None or len(mismatches) == 0
+    t_end = time.perf_counter()
+    if pending:
+        session.pending_calib_matrix = matrix
         overlay_b64 = base64.b64encode(recognition.grid_overlay_jpeg_bytes(img, matrix)).decode("ascii")
-        t_end = time.perf_counter()
         _log(f"[timing] body_read={t_body_read-t_start:.2f}s decode={t_decode-t_body_read:.2f}s "
              f"save={t_save-t_decode:.2f}s calib={t_calib-t_save:.2f}s predict={t_predict-t_calib:.2f}s "
              f"total={t_end-t_start:.2f}s -> pending_confirm "
@@ -177,46 +188,32 @@ async def calibration_photo(file: UploadFile, points: str | None = Form(None)):
             "mismatch_count": len(mismatches),
         }
 
-    # 自動検出：初期配置と完全一致した場合のみその場で対局開始。不一致なら人間の
-    # 手動タップへフォールバック（status="ready"のまま、idleに留まる）。
-    start_game = len(mismatches) == 0
-    game_id = None
-    if start_game:
-        session.calib_matrix = matrix
-        session.board = shogi.Board()
-        session.moves_usi = []
-        game_id = f"game_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        session.game_id = game_id
-        session.kif_path = RUNTIME_GAMES_DIR / f"{game_id}.kif"
-        session.kif_path.write_text("手数----指手---------消費時間--\n", encoding="utf-8")
-        session.state = GameState.PLAYING
-
-    t_end = time.perf_counter()
     _log(f"[timing] body_read={t_body_read-t_start:.2f}s decode={t_decode-t_body_read:.2f}s "
          f"save={t_save-t_decode:.2f}s calib={t_calib-t_save:.2f}s predict={t_predict-t_calib:.2f}s "
-         f"total={t_end-t_start:.2f}s -> {'playing' if start_game else 'ready'} "
+         f"total={t_end-t_start:.2f}s -> ready (auto mismatch, falling back to manual tap) "
          f"(responding now, mismatch_count={len(mismatches)})")
     return {
-        "status": "playing" if start_game else "ready",
-        "game_id": game_id,
+        "status": "ready",
+        "game_id": None,
         "recognized": recognized,
-        "matches_initial": len(mismatches) == 0,
+        "matches_initial": False,
         "mismatch_count": len(mismatches),
     }
 
 
 @app.post("/calibration/confirm_grid")
 async def calibration_confirm_grid():
-    """手動タップ後のグリッド目視確認でOKだった場合に呼ぶ→対局開始（UAT課題②）。
-    NGの場合はこのエンドポイントを呼ばず、アプリ側はタップ画面に戻るだけでよい
-    （pending_manual_matrixは次の/calibration/photoで上書きされるか、対局中止/再起動で
+    """グリッド目視確認でOKだった場合に呼ぶ→対局開始。手動タップ（UAT課題②）・
+    自動検出成功（2回目UAT課題③）のどちらの後でも同じエンドポイントを使う。
+    NGの場合はこのエンドポイントを呼ばず、アプリ側は手動タップ画面に戻るだけでよい
+    （pending_calib_matrixは次の/calibration/photoで上書きされるか、対局中止/再起動で
     クリアされる）。
     """
-    if session.pending_manual_matrix is None:
-        raise HTTPException(409, "no pending manual calibration to confirm")
+    if session.pending_calib_matrix is None:
+        raise HTTPException(409, "no pending calibration to confirm")
 
-    matrix = session.pending_manual_matrix
-    session.pending_manual_matrix = None
+    matrix = session.pending_calib_matrix
+    session.pending_calib_matrix = None
     session.calib_matrix = matrix
     session.board = shogi.Board()
     session.moves_usi = []

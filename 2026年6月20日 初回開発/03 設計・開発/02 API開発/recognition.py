@@ -188,7 +188,7 @@ def _convex_quad_area(pts):
     return cv2.contourArea(hull)
 
 
-def select_board_corners(circles, shape):
+def select_board_corners(circles, shape, img=None):
     """検出された赤丸候補から、盤の4隅とみなす4点を選ぶ。
 
     2026-06-21、方針変更（前PJの「画像4隅それぞれに最も近い赤丸を選ぶ」方式から変更——
@@ -199,42 +199,118 @@ def select_board_corners(circles, shape):
     新方式：候補点から4点を選ぶ全組み合わせのうち、凸包の面積が最大になる4点を盤の角とする。
     盤の四隅は候補の中で最も広い範囲に張る4点になるはずなので、画面の隅に偶然写り込んだ
     背景の赤い物体（盤の内側寄りにあることが多い）は面積で見れば不利になり選ばれにくい。
+
+    2026-06-22、UAT課題①：強い候補（円形度・半径とも基準を満たす）が3点しか見つからない場合の
+    救済を追加（imgを渡した場合のみ有効）。実際の失敗写真2枚を数値で解析したところ、4点中3点は
+    通常通り検出できるのに残り1点だけ極端に小さく断片化していた——原因はユーザー確認済みで
+    「暗所で読めない」のではなく、その箇所の光の反射が強く、赤丸が白飛びして彩度が落ちて
+    薄く写っていたこと（実測でもその領域のV（明度）は非常に高く、S（彩度）だけが低い、
+    白飛びに典型的な値だった）。色のHSVしきい値自体は他の3点と同じ値で一部のピクセルは通って
+    いるが、彩度が低い分マスクが薄くまばらになり、モルフォロジー処理や面積下限フィルタを
+    生き残れるだけの大きさが無かった。詳細は`_predict_missing_corner`/`_find_weak_marker_near`参照。
     """
     h, w = shape[:2]
     diag = (w ** 2 + h ** 2) ** 0.5
     filt = [c for c in circles if c[3] >= CIRC_MIN]
     if len(filt) < 4:
         filt = [c for c in circles if c[3] >= 0.45]
-    if len(filt) < 4:
-        return None
     rth = diag * BOARD_RADIUS_RATIO
     cand = [c for c in filt if c[2] >= rth]
     if len(cand) < 4:
         cand = sorted(filt, key=lambda c: -c[2])[:max(4, len(cand))]
-    if len(cand) < 4:
-        return None
 
-    points = [(c[0], c[1]) for c in cand]
-    best_area = -1.0
-    best_combo = None
-    for combo in combinations(points, 4):
-        area = _convex_quad_area(combo)
-        if area > best_area:
-            best_area = area
-            best_combo = combo
-    if best_combo is None:
+    if len(cand) >= 4:
+        points = [(c[0], c[1]) for c in cand]
+        best_area = -1.0
+        best_combo = None
+        for combo in combinations(points, 4):
+            area = _convex_quad_area(combo)
+            if area > best_area:
+                best_area = area
+                best_combo = combo
+        return list(best_combo) if best_combo is not None else None
+
+    if len(cand) == 3 and img is not None:
+        points3 = [(c[0], c[1]) for c in cand]
+        predicted = _predict_missing_corner(points3)
+        weak = _find_weak_marker_near(img, predicted)
+        if weak is not None:
+            return points3 + [weak]
+
+    return None
+
+
+def _predict_missing_corner(points):
+    """既知の3点から、盤の長方形を仮定して残り1点の位置を予測する。
+
+    長方形の対角線は中点を共有するため、隣接2点と接する「直角の頂点」をPとし、
+    残りの2点をA, Bとすると、求める4点目 = A + B - P になる。直角の頂点は、他の2点への
+    ベクトルがもっとも直交に近い（内積の絶対値がもっとも小さい）点として判定する。
+    """
+    pts = [np.array(p, dtype=float) for p in points]
+    best_idx, best_dot = 0, None
+    for i in range(3):
+        p, a, b = pts[i], pts[(i + 1) % 3], pts[(i + 2) % 3]
+        v1, v2 = a - p, b - p
+        n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
+        if n1 < 1e-6 or n2 < 1e-6:
+            continue
+        dot = abs(np.dot(v1, v2) / (n1 * n2))
+        if best_dot is None or dot < best_dot:
+            best_dot, best_idx = dot, i
+    right_angle_pt = pts[best_idx]
+    others = [pts[(best_idx + 1) % 3], pts[(best_idx + 2) % 3]]
+    predicted = others[0] + others[1] - right_angle_pt
+    return float(predicted[0]), float(predicted[1])
+
+
+def _find_weak_marker_near(img, point, search_radius=220, min_area=40):
+    """強い赤丸が3点しか見つからない場合のフォールバック：長方形補完で予測した位置の
+    近傍だけを狭く再探索し、通常のモルフォロジー処理・面積下限（200px）を生き残れない
+    ほど小さい/断片化した赤い塊でも採用する。
+
+    色のHSVしきい値（RED_LOWER/UPPER）自体は変更せず、探索範囲を予測位置周辺のごく狭い
+    矩形に限定しているため、画面の他の場所に写り込んだ無関係な赤い物体（駒袋等）を新たに
+    誤検出するリスクは増やさない——実際の駒袋写り込み写真（calib_20260622_110026_845991.jpg）
+    で検証済み：駒袋自体は巨大な赤色塊として検出されるが、4隅から離れた場所にあるため
+    この狭い探索矩形には入らない。
+    """
+    h, w = img.shape[:2]
+    cx, cy = point
+    x0, x1 = int(max(0, cx - search_radius)), int(min(w, cx + search_radius))
+    y0, y1 = int(max(0, cy - search_radius)), int(min(h, cy + search_radius))
+    if x1 <= x0 or y1 <= y0:
         return None
-    return list(best_combo)
+    crop = img[y0:y1, x0:x1]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    mask = cv2.bitwise_or(cv2.inRange(hsv, RED_LOWER1, RED_UPPER1),
+                           cv2.inRange(hsv, RED_LOWER2, RED_UPPER2))
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    best = None
+    for c in cnts:
+        a = cv2.contourArea(c)
+        if a < min_area:
+            continue
+        (x, y), _ = cv2.minEnclosingCircle(c)
+        if best is None or a > best[0]:
+            best = (a, x0 + x, y0 + y)
+    if best is None:
+        return None
+    return best[1], best[2]
 
 
 def calibrate_from_image(img):
     """画像から赤丸4個を自動検出してキャリブレーション行列を計算する。
     検出できなければNoneを返す（呼び出し側は人間の4隅タップにフォールバックする）。
+
+    2026-06-22、UAT課題①：4点のうち3点しか強い候補が見つからない場合でも、
+    select_board_corners内の救済ロジック（_find_weak_marker_near）に賭けてみるため、
+    最低3点あれば先に進む（従来は4点未満で即None）。
     """
     circles = detect_red_circles(img)
-    if len(circles) < 4:
+    if len(circles) < 3:
         return None
-    corners = select_board_corners(circles, img.shape)
+    corners = select_board_corners(circles, img.shape, img=img)
     if corners is None:
         return None
     return compute_calib(order_points(corners))
