@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -73,29 +74,39 @@ fun GameListScreen(modifier: Modifier = Modifier, onBack: () -> Unit) {
 
     LaunchedEffect(Unit) { reload() }
 
+    // 2026-06-22、3回目UAT課題②：「戻るボタンがなく、スマホの戻るボタンも効かず、
+    // アプリを強制終了するしかない」という報告への対応。実際にはボタン自体は存在していたが、
+    // 3つのボタンを横一列（Row）に並べていたため、ラベルの長さの合計が画面幅を超えて
+    // 右端の「一覧に戻る」が画面外に出てしまい押せなくなっていた——Rowは折り返さず、
+    // 画面外にあふれた分はそのままレイアウトされるため気付きにくい不具合だった。
+    // Columnに変更し各ボタンを画面幅いっぱいで縦に並べて確実に押せるようにした。
+    // 加えてハードウェア（スマホ本体）の戻るボタンは、このアプリが独自のcompose内画面遷移
+    // （AppScreen sealed class）を使っており、Androidの標準バックスタックに乗っていないため
+    // 何もしていなかった——BackHandlerで明示的にこの画面用の「戻る」相当の処理を割り当てる。
     if (selectedKif != null) {
+        BackHandler { selectedKif = null }
         Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
             Text(text = selectedKif ?: "", modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()))
-            Row(horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = {
-                    val intent = Intent(Intent.ACTION_SEND).apply {
-                        type = "text/plain"
-                        putExtra(Intent.EXTRA_TEXT, selectedKif)
-                    }
-                    context.startActivity(Intent.createChooser(intent, "KIFを共有"))
-                }) { Text("共有（LINE/メール）") }
-                // 2026-06-22、KENTO連携用：KENTO自体へのAPI連携は見送り、コピー→KENTOサイトで
-                // 貼り付けという手動連携にするとの指示を受けて追加。
-                Button(onClick = {
-                    val clipboard = context.getSystemService(ClipboardManager::class.java)
-                    clipboard.setPrimaryClip(ClipData.newPlainText("KIF", selectedKif))
-                    Toast.makeText(context, "棋譜をクリップボードにコピーしました", Toast.LENGTH_SHORT).show()
-                }) { Text("コピー（KENTO用）") }
-                Button(onClick = { selectedKif = null }) { Text("一覧に戻る") }
-            }
+            Button(onClick = { selectedKif = null }, modifier = Modifier.fillMaxWidth()) { Text("一覧に戻る") }
+            Button(onClick = {
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, selectedKif)
+                }
+                context.startActivity(Intent.createChooser(intent, "KIFを共有"))
+            }, modifier = Modifier.fillMaxWidth()) { Text("共有（LINE/メール）") }
+            // 2026-06-22、KENTO連携用：KENTO自体へのAPI連携は見送り、コピー→KENTOサイトで
+            // 貼り付けという手動連携にするとの指示を受けて追加。
+            Button(onClick = {
+                val clipboard = context.getSystemService(ClipboardManager::class.java)
+                clipboard.setPrimaryClip(ClipData.newPlainText("KIF", selectedKif))
+                Toast.makeText(context, "棋譜をクリップボードにコピーしました", Toast.LENGTH_SHORT).show()
+            }, modifier = Modifier.fillMaxWidth()) { Text("コピー（KENTO用）") }
         }
         return
     }
+
+    BackHandler { onBack() }
 
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
@@ -130,7 +141,10 @@ fun GameListScreen(modifier: Modifier = Modifier, onBack: () -> Unit) {
                             }
                         }
                     ) {
-                        Text(text = game.id ?: "(unknown)")
+                        // 2026-06-22、3回目UAT課題③：一覧の見分けがつかないとの指摘への対応。
+                        // game.id（プレフィックスを除いた安定識別子、API呼び出し用）ではなく、
+                        // 前PJと同じ命名規則の実ファイル名（【対局完了】等の状態表示付き）を表示する。
+                        Text(text = game.filename?.removeSuffix(".kif") ?: "(unknown)")
                     }
                 }
             }

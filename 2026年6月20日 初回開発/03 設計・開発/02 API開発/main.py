@@ -25,6 +25,7 @@
 
 import base64
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +53,34 @@ RUNTIME_GAMES_DIR.mkdir(parents=True, exist_ok=True)
 # （ユーザーにコンソールのコピペを頼まず、claude code側で直接読んで分析できるようにするため）。
 SERVER_LOG_PATH = RUNTIME_DIR / "server_timing.log"
 
+# 2026-06-22、3回目UAT課題③：KIFファイル名を前PJ（画面要件.xlsx「画面イメージ」シートO7セル、
+# app_streamlit.py kif_filename_for_start/rename_kif_prefix）と同じ命名規則に統一。
+# 仕様：【対局中】yyyyMMdd_hh-mm.kif（":"はWindowsファイル名に使えないため前PJ同様"-"に変更済み）。
+# 対局終了/中止/エラー中止のタイミングで【】内の状態表示だけを付け替える（日時部分は対局開始時刻で
+# 固定）。session.game_idにはこの日時部分（プレフィックスを除いた安定識別子）だけを保持する——
+# 状態遷移でファイル名（＝プレフィックス）が変わっても、game_idそのものは変わらないようにするため
+# （/games/{game_id}での検索はプレフィックスを無視してこのid部分で行う）。
+KIF_PREFIX_PLAYING = "【対局中】"
+KIF_PREFIX_FINISHED = "【対局完了】"
+KIF_PREFIX_ABORTED = "【対局中止】"
+KIF_PREFIX_ERROR_ABORTED = "【対局エラー中止】"
+
+
+def _strip_kif_prefix(stem: str) -> str:
+    """ファイル名から先頭の【...】状態表示を取り除き、安定識別子部分だけを返す。
+    旧形式（game_YYYYMMDD_HHMMSS、プレフィックスなし）はそのまま返す。"""
+    return re.sub(r"^【[^】]*】", "", stem)
+
+
+def _rename_kif(new_prefix: str) -> None:
+    """対局中のKIFファイルの状態プレフィックスを付け替える。/game/abortはどの状態からでも
+    無条件で呼べる設計のため、対局がまだ始まっていない（kif_path未設定）場合は何もしない。"""
+    if session.kif_path is None or not session.kif_path.exists():
+        return
+    new_path = session.kif_path.with_name(f"{new_prefix}{session.game_id}.kif")
+    session.kif_path.rename(new_path)
+    session.kif_path = new_path
+
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
@@ -66,6 +95,22 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 print("モデル読み込み中...")
 MODEL = recognition.load_model(MODEL_DIR)
 print("モデル読み込み完了。")
+
+# 2026-06-22、3回目UAT課題①：サーバ再起動後、最初の1回目のpredict_board()だけ
+# 異常に遅い（実測17.7秒、通常時1.3〜1.9秒の約10倍）→ひどい場合は数分単位で
+# ハングしたように見え、その間に来た別リクエストも応答が返らず、クライアント側は
+# 接続タイムアウト（10秒）で諦めてしまう、という事象がserver_timing.logの記録
+# （19:54:52・19:54:58受信→完了ログなし、19:56台でようやく応答再開）と一致した。
+# 原因はPyTorch CPU推論特有の「初回フォワードパスだけ遅い」現象（スレッドプール・
+# カーネル選択等の初期化が初回に発生するため）と推測——モデル自体は起動時に
+# 読み込み済み（load_state_dict）なので、ファイルI/Oの遅さではない。
+# 対策：起動時にダミー画像で1回だけ推論しておき、初回コストを「サーバ起動時」に
+# 払わせる（誰も待っていないタイミングに移す）。ユーザーの最初の本番撮影が
+# 遅くならないようにするのが目的で、推論結果自体は使わない。
+print("モデルのウォームアップ中（初回推論コストをここで払う）...")
+_warmup_start = time.perf_counter()
+recognition.predict_board(MODEL, np.zeros((recognition.WARP_SIDE, recognition.WARP_SIDE, 3), dtype=np.uint8))
+print(f"ウォームアップ完了（{time.perf_counter() - _warmup_start:.2f}秒）。")
 
 
 def _decode_image(data: bytes):
@@ -217,9 +262,9 @@ async def calibration_confirm_grid():
     session.calib_matrix = matrix
     session.board = shogi.Board()
     session.moves_usi = []
-    game_id = f"game_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    game_id = datetime.now().strftime("%Y%m%d_%H-%M")
     session.game_id = game_id
-    session.kif_path = RUNTIME_GAMES_DIR / f"{game_id}.kif"
+    session.kif_path = RUNTIME_GAMES_DIR / f"{KIF_PREFIX_PLAYING}{game_id}.kif"
     session.kif_path.write_text("手数----指手---------消費時間--\n", encoding="utf-8")
     session.state = GameState.PLAYING
     return {"status": "playing", "game_id": game_id}
@@ -282,11 +327,14 @@ async def post_move(file: UploadFile):
 
 @app.post("/game/end")
 async def game_end():
-    """終局通知。KIFは/moveの時点で逐次追記済みのため、ここでは状態をidleに戻すのみ。"""
+    """終局通知。KIFは/moveの時点で逐次追記済みのため、状態をidleに戻すのみだが、
+    3回目UAT課題③によりKIFファイル名の状態表示（【対局中】→【対局完了】）も付け替える。
+    """
     if session.state != GameState.PLAYING:
         raise HTTPException(409, f"game/end not allowed in state={session.state.value}")
 
     session.state = GameState.FINISHING
+    _rename_kif(KIF_PREFIX_FINISHED)
     result = {
         "status": "idle",
         "game_id": session.game_id,
@@ -297,33 +345,48 @@ async def game_end():
 
 
 @app.post("/game/abort")
-async def game_abort():
+async def game_abort(reason: str = "user"):
     """対局中止（2026-06-22、UAT課題①）。/game/endと違い対局開始前提の状態チェックをせず、
     現在どの状態にあっても無条件でidleに戻す——テスト中に「やり直したい」場面で確実に
     使える強制リセットとして使うため（サーバが想定外の状態で固まった場合の回復手段にもなる）。
     KIFファイルは削除せず、記録済みの手数まではそのまま残す。
+
+    2026-06-22、3回目UAT課題③：前PJ同様、ユーザーが押す「中止」と、認識エラー/通信エラーに
+    よる自動中止（2回目UAT課題⑤）とでKIFファイル名の状態表示を区別する
+    （【対局中止】 / 【対局エラー中止】）。reason="error"はAndroid側の自動中止経路
+    （PlayScreen.ktのabortGame呼び出し）から渡される——アプリ強制終了等で届かなかった場合は
+    区別がつかないため、その場合は無条件で"user"扱い（無難な方）にフォールバックする。
     """
+    prefix = KIF_PREFIX_ERROR_ABORTED if reason == "error" else KIF_PREFIX_ABORTED
+    _rename_kif(prefix)
     session.reset()
     return {"status": "idle"}
 
 
 @app.get("/games")
 async def list_games(date: str | None = None):
-    """KIF一覧。dateを指定すると対局開始日付（YYYYMMDD or YYYY-MM-DD）で絞り込む。"""
+    """KIF一覧。dateを指定すると対局開始日付（YYYYMMDD or YYYY-MM-DD）で絞り込む。
+    3回目UAT課題③：ファイル名が【対局中】等の状態プレフィックス付きになったため、
+    日付抽出は固定インデックスではなく「最初に現れる8桁の数字」を正規表現で拾う方式に変更
+    （新形式・旧形式game_YYYYMMDD_HHMMSSの両方に対応）。
+    """
     date_filter = date.replace("-", "") if date else None
     games = []
-    for path in sorted(RUNTIME_GAMES_DIR.glob("game_*.kif"), reverse=True):
-        # game_id形式: game_YYYYMMDD_HHMMSS
-        date_part = path.stem.split("_")[1] if len(path.stem.split("_")) > 1 else ""
+    for path in sorted(RUNTIME_GAMES_DIR.glob("*.kif"), reverse=True):
+        m = re.search(r"\d{8}", path.stem)
+        date_part = m.group(0) if m else ""
         if date_filter and date_part != date_filter:
             continue
-        games.append({"id": path.stem, "filename": path.name})
+        games.append({"id": _strip_kif_prefix(path.stem), "filename": path.name})
     return {"games": games}
 
 
 @app.get("/games/{game_id}")
 async def get_game(game_id: str):
-    path = RUNTIME_GAMES_DIR / f"{game_id}.kif"
-    if not path.exists():
-        raise HTTPException(404, "game not found")
-    return {"id": game_id, "kif": path.read_text(encoding="utf-8")}
+    """3回目UAT課題③：ファイル名の状態プレフィックスが対局終了/中止のタイミングで変わるため、
+    idから直接パスを構築できない。プレフィックスを除いた部分が一致するファイルを探す。
+    """
+    for path in RUNTIME_GAMES_DIR.glob("*.kif"):
+        if _strip_kif_prefix(path.stem) == game_id:
+            return {"id": game_id, "kif": path.read_text(encoding="utf-8")}
+    raise HTTPException(404, "game not found")

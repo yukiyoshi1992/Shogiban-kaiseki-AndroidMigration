@@ -202,7 +202,7 @@ fun PlayScreen(
                 val reasonMsg = "認識エラーのため対局を中止しました（${recordedCount}手目まで記録）\n詳細: ${finalResult.message}"
                 statusMessage = reasonMsg
                 Toast.makeText(context, reasonMsg, Toast.LENGTH_LONG).show()
-                abortGame(onGameEnded)
+                abortGame(onGameEnded, reason = "error")
                 return true
             }
             is MoveResult.NetworkError -> {
@@ -211,7 +211,7 @@ fun PlayScreen(
                 val reasonMsg = "通信エラーのため対局を中止しました（${moveCount}手目まで記録）\n詳細: ${finalResult.message}"
                 statusMessage = reasonMsg
                 Toast.makeText(context, reasonMsg, Toast.LENGTH_LONG).show()
-                abortGame(onGameEnded)
+                abortGame(onGameEnded, reason = "error")
                 return true
             }
         }
@@ -366,9 +366,12 @@ private suspend fun endGame(onGameEnded: () -> Unit) {
     }
 }
 
-private suspend fun abortGame(onGameEnded: () -> Unit) {
+// 2026-06-22、3回目UAT課題③：reasonは"user"（手動の中止ボタン、デフォルト）か
+// "error"（認識/通信エラーによる自動中止）。サーバ側でKIFファイル名の状態表示
+// （【対局中止】/【対局エラー中止】）を区別するために使う。
+private suspend fun abortGame(onGameEnded: () -> Unit, reason: String = "user") {
     try {
-        RetrofitClient.shogiApiService.gameAbort()
+        RetrofitClient.shogiApiService.gameAbort(reason)
     } catch (e: Exception) {
         // 中止はテスト時の強制リセットなので、通知が失敗しても画面は必ず戻す（下のonGameEnded）。
     }
