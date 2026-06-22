@@ -21,6 +21,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working in this
 - 代わりに、discord.js単体でログインのみ試す独立スクリプト（`new Client({intents:[...]}).login(TOKEN)`して`ready`イベントを見るだけの数行のNode/Bunスクリプト）で疎通確認すること。
 - それでも原因不明なら、推測でログ追加等を繰り返さず、ユーザーに状況を伝えて判断を仰ぐ。
 
+**2026-06-22夜、重要な追加判明（このユーザーの環境固有）**：このユーザーはClaude CodeをVS Code拡張機能経由で使っている（裸のターミナルではない）。`C:\Users\<ユーザー>\AppData\Roaming\Code\logs\<タイムスタンプ>\mcpGateway.log`を確認したところ、`[McpGatewayService] Initialized`という行が**VS Codeプロセス起動時に1回だけ**記録され、以降のセッションでは二度と記録されないことを確認した。つまり、**「セッションを切り直す」＝VS Code内で新しいチャットを開く、は`McpGatewayService`の再初期化にはならない**——MCPサーバーの起動試行はVS Codeのプロセス自体が起動した時に1回きりで、その時にDiscordサーバーの起動が失敗すると、同じVS Codeプロセスが動いている限り何度新しいチャットを開いても再試行されない。**このユーザーの場合、「新しいセッション」を試してもなお直らない時の正しい次の一手は、VS Codeを（チャットタブを閉じるのではなく）完全に終了して再起動してもらうこと**。ユーザーが「もうセッションを切り直した」と言っても、それが「新しいチャット」なのか「VS Code自体の再起動」なのかを先に確認すること（前回はこの区別を確認せず`/restart`を繰り返し案内してしまい、ユーザーの時間を無駄にした）。
+
 ## What this project is
 
 A native Android app + small FastAPI server that lets a user record a shogi (将棋) game as a KIF file by photographing the board after every move, with the board-recognition CNN doing the actual reading. This is the **successor** to a finished predecessor project, `\\YukiYoshiNAS\Shogiban-kaiseki-tool` (a Streamlit/Python desktop tool that proved the recognition pipeline works end-to-end). That predecessor is **done and archived as of 2026-06-20** — do not edit it; treat it as a read-only reference and a source of reusable code/model/lessons-learned. This repo starts at the requirements-definition stage; nothing has been built here yet (`03 設計・開発/01 Androidアプリ開発/` and `02 API開発/` are empty).
