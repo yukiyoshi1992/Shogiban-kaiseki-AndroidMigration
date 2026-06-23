@@ -573,60 +573,36 @@ _WEB_STYLE = """
 # 対策（2026-06-23、3回目・現行）：JSによるクリック横取り・fetch probe・location.href
 # 呼び出しを全廃し、`<a href>`のみによるブラウザ標準の遷移に戻した。HEAD probeで
 # 確認した通りサーバー応答自体は速い（数十ms）ため、素のクリックで詰まる理由はない。
-# 2026-06-23、8回目テスト課題⑨続報：JS全廃＋Cache-Control修正後、ユーザーから新たな
-# 決定的な観察が得られた——「1回目のタップは絶対に遷移しない。2回目は1回目と同じボタンで
-# なくてもよい（別のリンクでもよい）」。サーバーログでも、1回目のタップに対応するHTTP
-# リクエストは一度も記録されず、2回目のタップで初めて1件のGETが記録される、という
-# パターンが何度も繰り返し確認された。クリックを横取りするJSは存在しない（素の
-# `<a href>`のみ）ため、「クリックは発生したが遷移処理でつまずく」という状態はもはや
-# 存在しえない——1回目のタップはDOMのクリックイベントとして一切発生していないと判断できる。
-# これは「ページ読み込み直後の最初のタップは、ブラウザ（アドレスバー縮小・タブの
-# フォーカス確立等）に消費され、ページ内のコンテンツには届かない」という、Android系
-# ブラウザでよく報告される現象と一致する（タップ対象に依存しないのはこの説明と整合する：
-# どのリンクをタップしても、最初の1回はページではなくブラウザ自身への入力として処理される）。
-# 対策（scrollTo/focus）は実機検証で効果なし。さらに、別ブラウザのシークレットモード
-# でも再現したため、ブラウザ拡張機能・キャッシュ・サイト設定は完全に除外された。
+# 2026-06-23、8回目テスト課題⑨：「2回タップしないと遷移しない」問題、長い調査の末に
+# 真因確定。タッチイベントリスナー（touchstart/ontouchstart等、document/window/body
+# のどこに登録しても）・hoverシミュレーション説は、複数回の実機検証で**いずれも効果
+# なし**と判明した（コード自体はgit履歴に残っている、参考: commit 0c43e32〜5b2bab2）。
 #
-# 2026-06-23、決定的な実験：ユーザーがChrome DevTools（USB inspect）を接続し、
-# Console上でtouchstart/touchend/pointerdown/pointerup/mousedown/mouseup/click/
-# focus/blurをdocumentにcapture:trueで登録するコードを実行したところ、**それ以降は
-# 1回のタップで遷移するようになった**。一方、比較実験として中身のないコード（`0`を
-# 入力するだけ）を実行した場合は引き続き2回タップが必要だった——つまり「Consoleで
-# 何か実行すること自体」や「DevToolsが繋がっていること自体」が直したのではなく、
-# **touchstartなど実際にタッチイベントのリスナーをdocumentに登録すること自体**が
-# 直接の修正効果を持っていた。
-# これは、ページが（パッシブな)タッチリスナーを一つも持たない状態だと、Android機の
-# 一部でブラウザ側が読み込み直後の最初のタッチ入力の扱いを最適化・遅延させる
-# （ページ自体が触られることを想定していないと判断し、メインスレッドへの同期的な
-# 配送を後回しにする）ことがある、というモバイルWebで知られた挙動と一致する。
+# **決定的な実験**：ユーザーに「ページを開いてから3〜5秒何も操作せず待ってから
+# 1回だけタップする」を試してもらったところ、**それだけで1回のタップで遷移した**。
+# つまりタップの対象・JSの有無・リスナーの種類とは無関係に、**ページ読み込みから
+# 一定時間が経過していれば最初のタップでも問題なく反応する**ことが直接確認された
+# ——「最初のタップが常に無反応」という前提自体が不正確で、正しくは「読み込みから
+# 短時間以内のタップが無反応」だった。
 #
-# 続報：`document.addEventListener('touchstart', ...)`を1つ追加するだけでは
-# 実機（サーバー再起動して最新コードを反映した上で再検証）で効果がなかった。
-# ユーザーが「スマホ 2回タッチ リンク」で検索し、同種の症状に対する3件の実例
-# （ブログ記事2件・note記事1件）を発見——いずれも「タッチデバイスでhoverが反応
-# しないため1回目無反応・2回目で初めて反応する」という、モバイルブラウザの
-# 古典的な「ホバー状態シミュレーション」問題として説明されていた（タッチリスナーが
-# 一切無いページでは、ブラウザが1回目のタップを:hover表示用のシミュレーションとして
-# 処理し、2回目で初めてクリックを発火させる）。`document.addEventListener`だけの
-# 単独登録（capture:true、passive:trueのみ）は実機再検証で効果がなかったため、
-# 3件の記事で使われていた書き方（`window.ontouchstart`プロパティへの直接代入、
-# `window`へのcapture/bubble両方での`addEventListener`登録、`document`への
-# オプション無し`addEventListener`登録）をすべて組み合わせて適用したが、それでも
-# 実機で効果がなかった。
-#
-# 続報・修正：記事の1つ（note記事）が実際に使っていたのは`<body ontouchstart="">`
-# というHTML属性そのものだった。これは`document.body.ontouchstart`プロパティを
-# 設定するのと同じ効果で、`window.ontouchstart`とは**別のオブジェクトのプロパティ**
-# （bodyタグのonXXX属性のうちwindowへ転送される特別な一部——onload/onerror等——に
-# `ontouchstart`は含まれない）であり、JSで`window.ontouchstart`を設定しても
-# `<body ontouchstart="">`を再現できていなかった。`<body>`タグに直接この属性を
-# 追加して修正。
+# この端末（OPPO/ColorOS）特有と思われる、ページ読み込み直後のレンダラーが本格的に
+# 入力を処理できる状態になるまでに数秒かかる、という挙動に対し、JS側の小細工では
+# 解決できない（入力処理そのものが遅れているので、リスナーをどう登録しても変わらない）
+# と判断。代わりに、読み込み直後の数秒間はタップ対象を物理的に覆う「読み込み中」
+# オーバーレイを表示し、ユーザーが「まだ早い」と視覚的にわかるようにした上で、
+# オーバーレイが消えるタイミング（＝レンダラーが十分な時間動いた後）で初めて
+# タップを受け付けるようにする。
 _WEB_NAV_SCRIPT = """
+<div id="shogiban-ready-overlay" style="position:fixed;inset:0;background:rgba(250,250,250,0.92);
+     z-index:9999;display:flex;align-items:center;justify-content:center;
+     font-family:sans-serif;color:#666;font-size:14px;">読み込み中...しばらくお待ちください</div>
 <script>
-window.ontouchstart = function () {};
-window.addEventListener('touchstart', function () {}, true);
-window.addEventListener('touchstart', function () {}, false);
-document.addEventListener('touchstart', function () {});
+window.addEventListener('load', function () {
+  setTimeout(function () {
+    var el = document.getElementById('shogiban-ready-overlay');
+    if (el) el.remove();
+  }, 2000);
+});
 </script>
 """
 
@@ -671,7 +647,7 @@ async def web_games_list(date: str | None = None):
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>棋譜一覧</title>{_WEB_STYLE}</head>
-<body ontouchstart="">
+<body>
 <h1>棋譜一覧</h1>
 <input type="date" id="dateFilter"{date_attr}
        onchange="location.href = '/web/games' + (this.value ? '?date=' + this.value : '')">
@@ -710,7 +686,7 @@ async def web_game_detail(game_id: str):
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>棋譜詳細</title>{_WEB_STYLE}</head>
-<body ontouchstart="">
+<body>
 <a class="back-link" href="/web/games">← 一覧に戻る</a>
 {body}
 <div>
