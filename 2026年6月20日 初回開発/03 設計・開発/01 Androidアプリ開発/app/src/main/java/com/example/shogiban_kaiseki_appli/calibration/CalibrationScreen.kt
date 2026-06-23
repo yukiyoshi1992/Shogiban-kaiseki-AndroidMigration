@@ -258,20 +258,22 @@ fun CalibrationScreen(
             overlayBitmap = gridOverlayBitmap,
             isMismatchChoice = isMismatchChoice,
             mismatchCount = pendingMismatchCount,
+            isResume = resumeGameId != null,
             onOk = { handleGridConfirmOk() },
             onRetry = {
-                // 2026-06-22、2回目UAT課題③：自動検出成功後のグリッド確認でNGだった場合も
-                // ここを経由する（自動検出時はそもそも盤の四隅をタップしていないので、
-                // 同じ撮影済み写真に対して初めて手動タップを行うことになる）。
-                // 5回目UAT課題④：不一致選択（isMismatchChoice）で「手動タップで直す」を
-                // 押した場合も同じ処理（同じ撮影済み写真への手動タップ、撮り直し不要）。
-                tapPoints = emptyList()
-                tappingHint = if (isMismatchChoice) {
-                    "盤の四隅をタップしてください"
+                if (isMismatchChoice) {
+                    // 7回目UAT課題②：不一致（S-02b/S-03）の実態は駒の配置ミスであることが
+                    // 多く、手動タップ（透視変換のやり直し）では解決しないため、「再撮影」
+                    // として撮影からやり直す（同じ写真への手動タップには戻さない）。
+                    resetToCamera()
                 } else {
-                    "グリッドが盤に正しく重なっていませんでした。盤の四隅をタップしてください"
+                    // 2026-06-22、2回目UAT課題③：自動検出成功後のグリッド確認でNG
+                    // （4隅タップ精度の問題）だった場合はこちら。同じ撮影済み写真への
+                    // 手動タップで直せるため撮り直しは不要。
+                    tapPoints = emptyList()
+                    tappingHint = "グリッドが盤に正しく重なっていませんでした。盤の四隅をタップしてください"
+                    phase = CalibPhase.TAPPING
                 }
-                phase = CalibPhase.TAPPING
             }
         )
 
@@ -687,6 +689,7 @@ private fun GridConfirmStep(
     overlayBitmap: Bitmap?,
     isMismatchChoice: Boolean,
     mismatchCount: Int,
+    isResume: Boolean,
     onOk: () -> Unit,
     onRetry: () -> Unit
 ) {
@@ -695,9 +698,13 @@ private fun GridConfirmStep(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
+            // 7回目UAT課題②：「手動タップで直す」という旧文言は、実際の原因が
+            // ほぼ駒の配置ミス（人間が並べ間違えた）であって透視変換のズレではないのに、
+            // タップ操作で直すかのように読めてしまうという指摘。「誤りがないか確認してください」
+            // という中立的な文言に変更し、ボタン側で「再撮影」を明示する形にした。
             text = if (isMismatchChoice) {
-                "認識結果が想定する盤面と${mismatchCount}マス異なります。このまま進めますか？" +
-                    "それとも手動タップで直しますか？（緑の線は4隅の精度確認用です）"
+                val target = if (isResume) "中断時点の盤面" else "初期配置"
+                "認識結果が${target}と${mismatchCount}マス異なります（赤色塗りつぶし部）。誤りがないか確認してください"
             } else {
                 "緑の線が盤のマスに正しく重なっているか確認してください"
             },
@@ -722,7 +729,7 @@ private fun GridConfirmStep(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
             horizontalArrangement = Arrangement.SpaceEvenly
         ) {
-            Button(onClick = onRetry) { Text(if (isMismatchChoice) "手動タップで直す" else "やり直す") }
+            Button(onClick = onRetry) { Text(if (isMismatchChoice) "再撮影" else "やり直す") }
             Button(onClick = onOk) { Text(if (isMismatchChoice) "このまま進める" else "OK（対局開始）") }
         }
     }
