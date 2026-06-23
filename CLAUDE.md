@@ -39,6 +39,8 @@ A native Android app + small FastAPI server that lets a user record a shogi (将
 
 For session-to-session continuity and current status, see `01 企画・管理/handover.md` — read it alongside this file before doing anything.
 
+**New sub-project started 2026-06-23, separate continuity docs**: `2026年6月24日 CNN処理オンデバイス化/` is a verification-only experiment (does running the board-recognition CNN on the Android device instead of the PC server improve response time?) — explicitly does **not** touch this main app's existing source (server or Android), develops in a duplicated environment instead, and only migrates to production if the on-device approach is clearly better. It has its own `01 企画・全体管理/handover.md` and `02 要件定義/要件定義.md` — read those (not this file) when working on that sub-project.
+
 ## Why this project exists (carried over from `01 企画・管理/課題.txt`)
 
 The predecessor's actual operational pain points, which this rebuild is meant to solve:
