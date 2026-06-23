@@ -555,6 +555,51 @@ _WEB_STYLE = """
 </style>
 """
 
+# 2026-06-23、7回目UAT課題⑨：一覧の項目・「一覧に戻る」リンクが1回タップしただけでは
+# 遷移せず、2回目のタップで初めて遷移する不具合。:hover起因の説（既に修正済み）では
+# 説明できず（hoverスタイルを持たないback-linkでも同じ症状）、PCでは再現しない。
+# web_games_list/web_game_detailの実装メモにある通り、このLANは「直前の通信の直後に
+# 発行した通信が時々スマホ側だけ詰まる」特性がある（OkHttp・ページ内fetch()でも確認済み）。
+# ページ読み込み（1つ目の通信）の直後にリンクをタップする（2つ目の通信）のは、まさに
+# このパターンに当たるため、1回目のタップが詰まり、少し間を置いた2回目のタップで
+# 初めて通る、という挙動と推測される。
+# 対策：素のページ遷移（新しいHTTPリクエストが必ず発生する）に頼らず、クリックを
+# 横取りしてfetchでHTMLを取得し、失敗時は自前でリトライする。成功したら取得したHTML
+# そのものでページ内容を書き換える（＝ナビゲーション自体を1回のfetch呼び出しに閉じ込め、
+# 「取得成功後にもう一度ナビゲーション用の通信が発生する」という二重通信を作らない）。
+# 戻る/進むボタンのためにhistory.pushState・popstateも最小限ハンドルする。
+_WEB_NAV_SCRIPT = """
+<script>
+function shogibanLoadPage(url, push, attempt) {
+  attempt = attempt || 0;
+  fetch(url, { cache: 'no-store' })
+    .then(function (res) { if (!res.ok) throw new Error('status ' + res.status); return res.text(); })
+    .then(function (html) {
+      document.open();
+      document.write(html);
+      document.close();
+      if (push) history.pushState(null, '', url);
+    })
+    .catch(function () {
+      if (attempt < 4) {
+        setTimeout(function () { shogibanLoadPage(url, push, attempt + 1); }, 500);
+      } else {
+        location.href = url;
+      }
+    });
+}
+document.querySelectorAll('a.game-row, a.back-link').forEach(function (a) {
+  a.addEventListener('click', function (e) {
+    e.preventDefault();
+    shogibanLoadPage(a.getAttribute('href'), true, 0);
+  });
+});
+window.addEventListener('popstate', function () {
+  shogibanLoadPage(location.pathname + location.search, false, 0);
+});
+</script>
+"""
+
 
 @app.get("/web")
 async def web_root():
@@ -590,6 +635,7 @@ async def web_games_list(date: str | None = None):
 <input type="date" id="dateFilter"{date_attr}
        onchange="location.href = '/web/games' + (this.value ? '?date=' + this.value : '')">
 {list_html}
+{_WEB_NAV_SCRIPT}
 </body></html>"""
 
 
@@ -651,4 +697,5 @@ document.getElementById('copyBtn').addEventListener('click', async () => {{
   document.getElementById('msg').textContent = 'コピーしました';
 }});
 </script>
+{_WEB_NAV_SCRIPT}
 </body></html>"""
