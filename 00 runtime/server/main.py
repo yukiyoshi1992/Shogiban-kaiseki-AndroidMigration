@@ -32,6 +32,7 @@ import json
 import re
 import time
 from datetime import datetime
+from html import escape as html_escape
 from pathlib import Path
 
 import cv2
@@ -478,6 +479,10 @@ async def list_games(date: str | None = None):
     （`_kif_chronological_key`）でソートするよう変更——以前は状態プレフィックスの
     文字コードでグルーピングされ、対局中止/完了が時系列を無視してブロック化していた。
     """
+    return {"games": _list_games(date)}
+
+
+def _list_games(date: str | None) -> list[dict]:
     date_filter = date.replace("-", "") if date else None
     games = []
     for path in sorted(
@@ -494,7 +499,7 @@ async def list_games(date: str | None = None):
             "filename": path.name,
             "resumable": _is_resumable(path.name),
         })
-    return {"games": games}
+    return games
 
 
 @app.get("/games/{game_id}")
@@ -502,10 +507,17 @@ async def get_game(game_id: str):
     """3回目UAT課題③：ファイル名の状態プレフィックスが対局終了/中止のタイミングで変わるため、
     idから直接パスを構築できない。プレフィックスを除いた部分が一致するファイルを探す。
     """
+    kif = _get_game_kif(game_id)
+    if kif is None:
+        raise HTTPException(404, "game not found")
+    return {"id": game_id, "kif": kif}
+
+
+def _get_game_kif(game_id: str) -> str | None:
     for path in RUNTIME_GAMES_DIR.glob("*.kif"):
         if _strip_kif_prefix(path.stem) == game_id:
-            return {"id": game_id, "kif": path.read_text(encoding="utf-8")}
-    raise HTTPException(404, "game not found")
+            return path.read_text(encoding="utf-8")
+    return None
 
 
 # ===== Webブラウザ用の棋譜一覧・閲覧画面（追加要望、2026-06-23） =====
@@ -540,72 +552,65 @@ async def web_root():
 
 
 @app.get("/web/games", response_class=HTMLResponse)
-async def web_games_list():
+async def web_games_list(date: str | None = None):
+    """2026-06-23、実機検証で発覚：一覧ページ自体（このエンドポイント）はスマホからでも
+    届くが、ページ内のJSが続けて発行する2回目の通信（fetch('/games')）がスマホからだと
+    届かない／止まることがあった（PCの同じブラウザでは問題なし）。Androidネイティブの
+    OkHttpで以前経験した「1回目の直後の2回目のリクエストが届かない」事象
+    （RetrofitClient.kt参照）と同じ系統の、このLAN特有の問題と疑われる。原因の真因は
+    特定できていないが、回避策として一覧データをこのページ自体に直接埋め込み、JSからの
+    追加fetchを行わない構成に変更した（日付フィルタも素のページ遷移にした）。
+    """
+    games = _list_games(date)
+    if games:
+        rows = "\n".join(
+            f'<a class="game-row" href="/web/games/{html_escape(g["id"])}">{html_escape(g["filename"])}</a>'
+            for g in games
+        )
+        list_html = f'<div id="list">{rows}</div>'
+    else:
+        list_html = '<div id="list" class="empty">対局が見つかりません</div>'
+    date_attr = f' value="{html_escape(date)}"' if date else ""
     return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>棋譜一覧</title>{_WEB_STYLE}</head>
 <body>
 <h1>棋譜一覧</h1>
-<input type="date" id="dateFilter">
-<div id="list" class="empty">読み込み中...</div>
-<script>
-async function load() {{
-  const date = document.getElementById('dateFilter').value;
-  const url = date ? `/games?date=${{date}}` : '/games';
-  const res = await fetch(url);
-  const data = await res.json();
-  const list = document.getElementById('list');
-  if (!data.games || data.games.length === 0) {{
-    list.className = 'empty';
-    list.textContent = '対局が見つかりません';
-    return;
-  }}
-  list.className = '';
-  list.innerHTML = '';
-  for (const g of data.games) {{
-    const a = document.createElement('a');
-    a.className = 'game-row';
-    a.href = `/web/games/${{encodeURIComponent(g.id)}}`;
-    a.textContent = g.filename;
-    list.appendChild(a);
-  }}
-}}
-document.getElementById('dateFilter').addEventListener('change', load);
-load();
-</script>
+<input type="date" id="dateFilter"{date_attr}
+       onchange="location.href = '/web/games' + (this.value ? '?date=' + this.value : '')">
+{list_html}
 </body></html>"""
 
 
 @app.get("/web/games/{game_id}", response_class=HTMLResponse)
 async def web_game_detail(game_id: str):
+    """web_games_listと同じ理由で、KIF本文もページ内JSのfetchに頼らずこのページ自体に
+    直接埋め込む構成にした（2026-06-23）。"""
+    kif = _get_game_kif(game_id)
+    if kif is None:
+        body = "<h1>対局が見つかりません</h1>"
+        kif_js_literal = "null"
+    else:
+        body = f'<h1>{html_escape(game_id)}</h1>\n<pre id="kif">{html_escape(kif)}</pre>'
+        # </script>でHTMLが途中で切れないよう、念のため"</"をエスケープしてから埋め込む
+        kif_js_literal = json.dumps(kif).replace("</", "<\\/")
+    game_id_js_literal = json.dumps(game_id).replace("</", "<\\/")
     return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>棋譜詳細</title>{_WEB_STYLE}</head>
 <body>
 <a class="back-link" href="/web/games">← 一覧に戻る</a>
-<h1 id="title">読み込み中...</h1>
-<pre id="kif"></pre>
+{body}
 <div>
   <button id="shareBtn">共有</button>
   <button id="copyBtn">コピー（分析Tool貼付用）</button>
 </div>
 <div id="msg"></div>
 <script>
-const gameId = decodeURIComponent(location.pathname.split('/').pop());
-let kifText = '';
-async function load() {{
-  const res = await fetch(`/games/${{encodeURIComponent(gameId)}}`);
-  if (!res.ok) {{
-    document.getElementById('title').textContent = '対局が見つかりません';
-    return;
-  }}
-  const data = await res.json();
-  kifText = data.kif;
-  document.getElementById('title').textContent = gameId;
-  document.getElementById('kif').textContent = kifText;
-}}
+const gameId = {game_id_js_literal};
+const kifText = {kif_js_literal};
 // このサーバーはLAN内のhttp（暗号化なし）でアクセスする運用のため、navigator.clipboardは
 // 「セキュアコンテキスト」（https or localhost）でないブラウザでは使えない可能性がある。
 // 使えない場合は非表示textarea+document.execCommand('copy')（非推奨だが平文httpでも動く）に
@@ -635,6 +640,5 @@ document.getElementById('copyBtn').addEventListener('click', async () => {{
   await copyText(kifText);
   document.getElementById('msg').textContent = 'コピーしました';
 }});
-load();
 </script>
 </body></html>"""
