@@ -563,26 +563,28 @@ _WEB_STYLE = """
 # ページ読み込み（1つ目の通信）の直後にリンクをタップする（2つ目の通信）のは、まさに
 # このパターンに当たるため、1回目のタップが詰まり、少し間を置いた2回目のタップで
 # 初めて通る、という挙動と推測される。
-# 対策：素のページ遷移（新しいHTTPリクエストが必ず発生する）に頼らず、クリックを
-# 横取りしてfetchでHTMLを取得し、失敗時は自前でリトライする。成功したら取得したHTML
-# そのものでページ内容を書き換える（＝ナビゲーション自体を1回のfetch呼び出しに閉じ込め、
-# 「取得成功後にもう一度ナビゲーション用の通信が発生する」という二重通信を作らない）。
-# 戻る/進むボタンのためにhistory.pushState・popstateも最小限ハンドルする。
+# 対策（2026-06-23、1回目）：document.write でページ内容自体を書き換え、history.pushState/
+# popstateも自前で処理するSPA的な方式を試したが、実機検証の結果「直らない上に戻る操作も
+# 効かなくなった」との報告があり、過剰に複雑だったため撤回した。
+# 対策（2026-06-23、2回目・現行）：ブラウザの素のページ遷移・戻る操作はそのまま一切変更せず
+# （`<a href>`のまま、history/document操作なし）、クリック時に直前リトライとして軽い
+# probe（HEADリクエスト）を試すだけにする。probeが成功した場合は通常のリンク遷移
+# （`location.href`）をそのまま行う。probeが詰まった場合は0.5秒おきに最大4回リトライし、
+# 全部失敗したら最終手段としてそのまま`location.href`へフォールバックする（今までと同じ
+# 挙動に戻るだけで、悪化はしない）。戻る/進むボタンは完全にブラウザ標準のままなので、
+# このスクリプトが原因で壊れることはない。
 _WEB_NAV_SCRIPT = """
 <script>
-function shogibanLoadPage(url, push, attempt) {
+function shogibanProbeThenGo(url, attempt) {
   attempt = attempt || 0;
-  fetch(url, { cache: 'no-store' })
-    .then(function (res) { if (!res.ok) throw new Error('status ' + res.status); return res.text(); })
-    .then(function (html) {
-      document.open();
-      document.write(html);
-      document.close();
-      if (push) history.pushState(null, '', url);
+  fetch(url, { method: 'HEAD', cache: 'no-store' })
+    .then(function (res) {
+      if (!res.ok) throw new Error('status ' + res.status);
+      location.href = url;
     })
     .catch(function () {
       if (attempt < 4) {
-        setTimeout(function () { shogibanLoadPage(url, push, attempt + 1); }, 500);
+        setTimeout(function () { shogibanProbeThenGo(url, attempt + 1); }, 500);
       } else {
         location.href = url;
       }
@@ -591,11 +593,8 @@ function shogibanLoadPage(url, push, attempt) {
 document.querySelectorAll('a.game-row, a.back-link').forEach(function (a) {
   a.addEventListener('click', function (e) {
     e.preventDefault();
-    shogibanLoadPage(a.getAttribute('href'), true, 0);
+    shogibanProbeThenGo(a.getAttribute('href'), 0);
   });
-});
-window.addEventListener('popstate', function () {
-  shogibanLoadPage(location.pathname + location.search, false, 0);
 });
 </script>
 """
