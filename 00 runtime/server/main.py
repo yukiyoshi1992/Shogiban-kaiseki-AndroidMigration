@@ -535,7 +535,15 @@ _WEB_STYLE = """
   .game-row { display: flex; justify-content: space-between; align-items: center;
               padding: 10px 12px; margin-bottom: 6px; background: #fff; border-radius: 6px;
               box-shadow: 0 1px 2px rgba(0,0,0,0.1); text-decoration: none; color: #222; }
-  .game-row:hover { background: #f0f0f0; }
+  /* 2026-06-23、スマホで一覧の項目が1タップで遷移しない不具合の修正：
+     タッチ端末のブラウザは:hoverを「タップ＝即クリック」ではなく「まず仮想ホバー状態に
+     入る」と解釈することがあり、その場合1回目のタップではホバー表示が付くだけでリンクへ
+     遷移せず、2回目のタップで初めて遷移する（よくあるモバイルブラウザの挙動）。
+     hoverを本当にサポートするポインタ環境（マウス等）にだけ適用するよう絞り込み、
+     タッチ端末では:hoverスタイル自体を無効にしてこの問題を回避する。 */
+  @media (hover: hover) and (pointer: fine) {
+    .game-row:hover { background: #f0f0f0; }
+  }
   input[type=date] { padding: 6px; margin-bottom: 12px; }
   button { padding: 8px 14px; margin-right: 8px; margin-top: 8px; cursor: pointer; }
   pre { background: #fff; padding: 12px; border-radius: 6px; white-space: pre-wrap;
