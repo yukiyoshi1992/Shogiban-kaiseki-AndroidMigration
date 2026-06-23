@@ -21,6 +21,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -123,6 +124,18 @@ private fun ShogiAppFlow(
     setKeepScreenOn: (Boolean) -> Unit
 ) {
     var screen by remember { mutableStateOf<AppScreen>(AppScreen.Calibration()) }
+
+    // 7回目UAT課題⑦：Bluetoothリモコンの接続が不安定な時に何度もスイッチが反応すると、
+    // 撮影を待っていない画面（過去の対局一覧や、キャリブレーションの判定待ち・確認画面等）で
+    // 直前の画面が登録した古いシャッター処理（古いCameraXのcapture()クロージャ等）がそのまま
+    // 呼ばれてしまい、想定外のタイミングでの二重送信・状態の不整合（アプリ強制終了の報告あり）
+    // につながっていたと考えられる。画面が切り替わるたびに、まず安全な無処理（無視）の
+    // トリガーで上書きしておき、実際に撮影を受け付ける画面（CameraCaptureStep・PlayScreen）
+    // 側が自分のLaunchedEffect(Unit)で本来の処理に上書きする、という順序にして、登録し忘れ・
+    // 古いままの状態が残るケースを構造的になくす。
+    LaunchedEffect(screen) {
+        registerShutterTrigger {}
+    }
 
     when (val s = screen) {
         is AppScreen.Calibration -> {
