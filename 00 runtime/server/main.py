@@ -574,25 +574,55 @@ _WEB_STYLE = """
 # 挙動に戻るだけで、悪化はしない）。戻る/進むボタンは完全にブラウザ標準のままなので、
 # このスクリプトが原因で壊れることはない。
 _WEB_NAV_SCRIPT = """
+<div id="shogiban-nav-log" style="position:fixed;bottom:0;left:0;right:0;
+     max-height:40vh;overflow-y:auto;background:rgba(0,0,0,0.85);color:#0f0;
+     font-family:monospace;font-size:11px;padding:6px;z-index:9999;display:none;
+     white-space:pre-wrap;"></div>
 <script>
+// 2026-06-23、8回目テスト課題⑨⑪：HEAD probeを405回避後も「ロードゲージが伸びきらず
+// 遷移しない」という症状が続いたため、何が起きているか目視で追えるよう画面下部に
+// 簡易ログを表示する（uvicornのアクセスログだけではタップ後にlocation.hrefが本当に
+// 呼ばれたか・その後何が起きたかが分からないため）。
+var shogibanNavT0 = null;
+function shogibanLog(msg) {
+  var el = document.getElementById('shogiban-nav-log');
+  if (!el) return;
+  el.style.display = 'block';
+  var t = shogibanNavT0 ? (Date.now() - shogibanNavT0) + 'ms' : '0ms';
+  el.textContent += '[' + t + '] ' + msg + '\\n';
+  el.scrollTop = el.scrollHeight;
+}
 function shogibanProbeThenGo(url, attempt) {
   attempt = attempt || 0;
+  shogibanLog('probe attempt ' + attempt + ' -> ' + url);
   fetch(url, { method: 'HEAD', cache: 'no-store' })
     .then(function (res) {
+      shogibanLog('probe ' + (res.ok ? 'OK' : ('status ' + res.status)));
       if (!res.ok) throw new Error('status ' + res.status);
+      shogibanLog('calling location.href now');
       location.href = url;
+      setTimeout(function () {
+        shogibanLog('STILL HERE 3s after location.href - navigation did not happen');
+      }, 3000);
     })
-    .catch(function () {
+    .catch(function (err) {
+      shogibanLog('probe failed: ' + err);
       if (attempt < 4) {
         setTimeout(function () { shogibanProbeThenGo(url, attempt + 1); }, 500);
       } else {
+        shogibanLog('giving up on probe, calling location.href anyway');
         location.href = url;
+        setTimeout(function () {
+          shogibanLog('STILL HERE 3s after fallback location.href - navigation did not happen');
+        }, 3000);
       }
     });
 }
 document.querySelectorAll('a.game-row, a.back-link').forEach(function (a) {
   a.addEventListener('click', function (e) {
     e.preventDefault();
+    shogibanNavT0 = Date.now();
+    shogibanLog('tap: ' + a.getAttribute('href'));
     shogibanProbeThenGo(a.getAttribute('href'), 0);
   });
 });
