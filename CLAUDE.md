@@ -344,3 +344,10 @@ User reproduced the previously-deferred "Bluetooth shutter causes a spurious cap
 - **③（不一致選択画面の文字が「過去の対局」ボタンと重なって読めない）**: `CalibrationScreen`はMainActivity側のBoxで「過去の対局」ボタン（画面右上、TopEnd）と常に重ねて表示される設計（4回目UAT履歴の「Known minor side effect」参照）。`GridConfirmStep`のメッセージ`Text`はこれまで`padding(12.dp)`だけで画面最上部から始まっていたため、特に不一致時の長い文言（「認識結果が想定する盤面と${mismatchCount}マス異なります...」）がそのボタンと視覚的に重なっていた。**Fix**: `Text`のpaddingを`top = 64.dp`に変更し、ボタンの占有領域を避けるだけの余白を確保。`GridConfirmStep`はOK/やり直し画面（`isMismatchChoice=false`）でも同じ`Text`を使うため両方のケースに効く。ボタン自体を非表示にする設計変更は行っていない（既存の「全段階で表示」という割り切りはそのまま）。
 - **④（棋譜一覧で【対局中止】が【対局完了】の下にまとめられ、時系列順になっていない）**: `00 runtime/server/main.py`の`list_games()`が`sorted(RUNTIME_GAMES_DIR.glob("*.kif"), reverse=True)`で**ファイル名の生の文字列**（先頭の`【対局中】`等の状態プレフィックス込み）をソートキーにしていたため、文字コード順で状態プレフィックスごとにブロック化され、同じ日に完了/中止が混在する対局が時系列を無視してグルーピングされていた。**Fix**: 新しいヘルパー`_kif_chronological_key(stem)`（ファイル名から数字以外を`re.sub(r"\D", "", stem)`で除去——状態プレフィックスの括弧文字も"game_"等の英字も数字以外なので自動的に落ちる）を`sorted()`の`key=`に指定。新形式（`yyyyMMdd_hh-mm`→12桁）・旧形式（`game_YYYYMMDD_HHMMSS`→14桁）どちらも数字列の文字列比較がそのまま時系列比較になることを確認済み（実際の`runtime/games/`内18件のファイルに対して`key`関数を直接実行し、出力順が状態プレフィックスに関わらず正しく日時降順になることを確認——新形式は全て旧形式より新しい時期に作られたものなので、新形式が全件上に来る現在の並びも実際の時系列と一致している）。Android側（`GameListScreen.kt`）はサーバが返した順序をそのまま表示するだけなので変更不要。
 - **両方とも未検証**（実機・Gradle未確認、brace/paren数と`py_compile`のみ確認）。次回ユーザーに、③不一致画面で文字が読めるか、④棋譜一覧が時系列順に見えるか、を確認してもらう必要あり。
+
+## UATシナリオ2種、対局再開フローと①の解決状況を反映（2026-06-23）
+
+`04 UAT/generate_test_scenarios.py`（→`総合テストシナリオ.xlsx`）と`generate_user_flow_scenarios.py`（→`UATシナリオ.xlsx`）を更新・再実行（手編集はしない、プロジェクトの既存方針通り）：
+- 対局再開機能（5回目UAT④、commit `3a0904e`）が「未実装・検討中」（旧F-02／旧S-15）のまま放置されていたのをユーザーが指摘 → 実装済みの正式シナリオに置き換え（`総合テストシナリオ.xlsx`の新カテゴリ G-01〜G-03、`UATシナリオ.xlsx`のS-15〜S-17：盤面一致／不一致→進める／不一致→手動タップで直す、の3パターン）。
+- B-12／S-14（Bluetoothシャッター誤発火）も6回目UAT①での根本解決（Activity再生成が真因、`configChanges`で抑制）を反映し、「調査中・対応保留」から「実装済み」の退行確認シナリオに変更。
+- いずれも実機未検証の項目を含むため、xlsxの「実装状況」列はコードが実装済みであることを示すだけで、実機UATでの確認自体は別途必要。

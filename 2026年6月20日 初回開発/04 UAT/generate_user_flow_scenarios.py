@@ -68,14 +68,22 @@ ROWS = [
      "キャリブレーション画面から「過去の対局」を開く → 一覧を見る → 対局を選んでKIF詳細を確認 → 一覧に戻る → キャリブレーション画面に戻る",
      "対局を増やさず一覧・詳細を見るだけの操作が問題なく行えること",
      "A-12,C-01,C-02,C-05,C-06,C-07", "低"),
-    ("S-14", "［既知の課題・参考］Bluetoothシャッター接続時の誤発火",
-     "対局中 → Bluetoothシャッター機器を新たに接続 → （想定外）音量キーイベントが誤発火 → 撮影 → 認識エラー → 自動中止",
-     "5回目UAT課題①で調査中の既知の問題。再現した場合は新規不具合として報告せず、診断用トーストの有無やlogcatの記録をお願いしたい",
-     "B-12（調査中・対応保留）", "高（調査中）"),
-    ("S-15", "［未実装・参考］中断局の再開",
-     "棋譜一覧から中断局を選ぶ → 「対局再開」 → 棋譜通りに盤面を再現して撮影 → キャリブレーション → 対局再開",
-     "5回目UAT課題④で実現性検討中、現時点では未実装。実装後にこのシナリオを正式なテスト対象に追加する",
-     "（未実装）", "（実装後に確定）"),
+    ("S-14", "Bluetoothシャッター接続時に画面が初期化されないことの確認",
+     "対局中（またはキャリブレーション中）→ Bluetoothシャッター機器のスイッチをオン（ボタン操作はしない）→ 画面・進行状況がそのまま保たれる",
+     "6回目UAT課題①で根本解決（Android側のActivity再生成が原因と判明、configChangesで抑制）。退行していないことの確認",
+     "B-12", "高"),
+    ("S-15", "中断局の再開（盤面一致）",
+     "棋譜一覧から中断局（【対局中】【対局中止】【対局エラー中止】のいずれか）を選ぶ → 「対局再開」 → 中断時点の棋譜通りに盤面を再現して撮影 → 赤丸自動検出 or 手動タップ → 盤面一致 → 対局再開（手数・game_idは継続） → 続きの手を撮影 → 終局",
+     "5回目UAT課題④で実装済み。中断局からの継続が正しく動き、手数や持ち駒（KIF側から引き継ぎ）が壊れないこと",
+     "G-01", "高"),
+    ("S-16", "中断局の再開（盤面不一致→このまま進める）",
+     "S-15と同じ前提 → 撮影した盤面が中断時点の棋譜と一致しない（駒の並べ間違い等） → グリッド確認画面で不一致件数を見て「このまま進める」 → 対局再開 → 続きの手を撮影",
+     "不一致でも人間が判断して進められること、認識結果を正として以後の手の差分判定が正しく続くこと",
+     "G-02", "中"),
+    ("S-17", "中断局の再開（盤面不一致→手動タップで直す）",
+     "S-16と同じ状況 → 「手動タップで直す」を選び、同じ写真のまま盤の四隅をタップ → グリッド確認OK → 対局再開",
+     "撮り直しなしで手動補正に切り替えられ、その後の対局再開が正しく動くこと",
+     "G-03", "中"),
 ]
 
 wb = openpyxl.Workbook()
@@ -92,20 +100,12 @@ for col_idx, _ in enumerate(HEADER, start=1):
     cell.alignment = Alignment(horizontal="center", vertical="center")
 
 wrap = Alignment(wrap_text=True, vertical="top")
-note_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
-future_fill = PatternFill(start_color="F4CCCC", end_color="F4CCCC", fill_type="solid")
 
 for row in ROWS:
     ws.append(row)
     r = ws.max_row
     for c in range(1, len(HEADER) + 1):
         ws.cell(row=r, column=c).alignment = wrap
-    if row[0] == "S-14":
-        for c in range(1, len(HEADER) + 1):
-            ws.cell(row=r, column=c).fill = note_fill
-    if row[0] == "S-15":
-        for c in range(1, len(HEADER) + 1):
-            ws.cell(row=r, column=c).fill = future_fill
 
 widths = [6, 34, 60, 36, 22, 14]
 for i, w in enumerate(widths, start=1):
