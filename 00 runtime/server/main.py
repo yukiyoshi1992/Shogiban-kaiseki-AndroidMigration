@@ -584,16 +584,26 @@ _WEB_STYLE = """
 # フォーカス確立等）に消費され、ページ内のコンテンツには届かない」という、Android系
 # ブラウザでよく報告される現象と一致する（タップ対象に依存しないのはこの説明と整合する：
 # どのリンクをタップしても、最初の1回はページではなくブラウザ自身への入力として処理される）。
-# 対策：ページ読み込み完了時に`window.scrollTo`/`window.focus`を呼び、ブラウザの
-# チューム（アドレスバー等）の状態を読み込み時点で確定させておく、よく知られた回避策を
-# 試す。クリックの横取り・fetch・location.href操作は一切行わない（前回の教訓を踏まえ、
-# 素のリンク遷移そのものには触れない）。
+# 対策（scrollTo/focus）は実機検証で効果なし。さらに、別ブラウザのシークレットモード
+# でも再現したため、ブラウザ拡張機能・キャッシュ・サイト設定は完全に除外された。
+#
+# 2026-06-23、決定的な実験：ユーザーがChrome DevTools（USB inspect）を接続し、
+# Console上でtouchstart/touchend/pointerdown/pointerup/mousedown/mouseup/click/
+# focus/blurをdocumentにcapture:trueで登録するコードを実行したところ、**それ以降は
+# 1回のタップで遷移するようになった**。一方、比較実験として中身のないコード（`0`を
+# 入力するだけ）を実行した場合は引き続き2回タップが必要だった——つまり「Consoleで
+# 何か実行すること自体」や「DevToolsが繋がっていること自体」が直したのではなく、
+# **touchstartなど実際にタッチイベントのリスナーをdocumentに登録すること自体**が
+# 直接の修正効果を持っていた。
+# これは、ページが（パッシブな)タッチリスナーを一つも持たない状態だと、Android機の
+# 一部でブラウザ側が読み込み直後の最初のタッチ入力の扱いを最適化・遅延させる
+# （ページ自体が触られることを想定していないと判断し、メインスレッドへの同期的な
+# 配送を後回しにする）ことがある、というモバイルWebで知られた挙動と一致する。
+# touchstartリスナーを1つ登録するだけでこの最適化を抑制でき、入力が即座に処理される
+# ようになる。
 _WEB_NAV_SCRIPT = """
 <script>
-window.addEventListener('load', function () {
-  window.scrollTo(0, 1);
-  window.focus();
-});
+document.addEventListener('touchstart', function () {}, { passive: true, capture: true });
 </script>
 """
 
