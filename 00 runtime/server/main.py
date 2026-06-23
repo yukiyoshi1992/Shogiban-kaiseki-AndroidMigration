@@ -599,11 +599,25 @@ _WEB_STYLE = """
 # 一部でブラウザ側が読み込み直後の最初のタッチ入力の扱いを最適化・遅延させる
 # （ページ自体が触られることを想定していないと判断し、メインスレッドへの同期的な
 # 配送を後回しにする）ことがある、というモバイルWebで知られた挙動と一致する。
-# touchstartリスナーを1つ登録するだけでこの最適化を抑制でき、入力が即座に処理される
-# ようになる。
+#
+# 続報：`document.addEventListener('touchstart', ...)`を1つ追加するだけでは
+# 実機（サーバー再起動して最新コードを反映した上で再検証）で効果がなかった。
+# ユーザーが「スマホ 2回タッチ リンク」で検索し、同種の症状に対する3件の実例
+# （ブログ記事2件・note記事1件）を発見——いずれも「タッチデバイスでhoverが反応
+# しないため1回目無反応・2回目で初めて反応する」という、モバイルブラウザの
+# 古典的な「ホバー状態シミュレーション」問題として説明されていた（タッチリスナーが
+# 一切無いページでは、ブラウザが1回目のタップを:hover表示用のシミュレーションとして
+# 処理し、2回目で初めてクリックを発火させる）。`document.addEventListener`だけの
+# 単独登録（capture:true、passive:trueのみ）は実機再検証で効果がなかったため、
+# 3件の記事で使われていた書き方（`window.ontouchstart`プロパティへの直接代入、
+# `window`へのcapture/bubble両方での`addEventListener`登録、`document`への
+# オプション無し`addEventListener`登録）をすべて組み合わせて適用する。
 _WEB_NAV_SCRIPT = """
 <script>
-document.addEventListener('touchstart', function () {}, { passive: true, capture: true });
+window.ontouchstart = function () {};
+window.addEventListener('touchstart', function () {}, true);
+window.addEventListener('touchstart', function () {}, false);
+document.addEventListener('touchstart', function () {});
 </script>
 """
 
