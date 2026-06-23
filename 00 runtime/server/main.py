@@ -1,7 +1,9 @@
 """APIサーバ本体。
 
-`/health` と `/photo`（写真を受け取って保存するだけの通信確認用ダミー）は初期動作確認で使った
-ものをそのまま残してある。本番の対局フローは `/calibration/photo` 以降の新エンドポイント。
+`/health` と `/photo`（写真を受け取って保存するだけの通信確認用ダミー、初期動作確認用）は
+6回目UAT課題で削除済み（`camera/@old/CameraScreen.kt`からしか参照されておらず、その
+アーカイブファイル自体も合わせて削除する判断をユーザーから得た）。本番の対局フローは
+`/calibration/photo` 以降の新エンドポイントのみ。
 
 エンドポイント構成はアーキテクチャ検討.md 3節の案がベースだが、2026-06-22に
 /calibration/confirmは廃止・統合済み（旧人間確認UIの残骸だったため）。代わりに
@@ -152,10 +154,6 @@ def _log(msg: str) -> None:
     with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
         f.write(f"[{ts}] {msg}\n")
 
-# 旧来の通信確認用ダミーエンドポイント（/photo）が使っていた保存先。本番フローは runtime/ 配下を使う。
-UPLOAD_DIR = BASE_DIR / "received_photos"
-UPLOAD_DIR.mkdir(exist_ok=True)
-
 print("モデル読み込み中...")
 MODEL = recognition.load_model(MODEL_DIR)
 print("モデル読み込み完了。")
@@ -187,19 +185,6 @@ def _save_runtime_photo(img, prefix: str) -> Path:
     path = RUNTIME_PHOTOS_DIR / f"{prefix}_{timestamp}.jpg"
     cv2.imencode(".jpg", img)[1].tofile(str(path))
     return path
-
-
-@app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.post("/photo")
-async def receive_photo(file: UploadFile) -> dict[str, str]:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    dest = UPLOAD_DIR / f"{timestamp}_{file.filename}"
-    dest.write_bytes(await file.read())
-    return {"status": "ok", "saved_as": dest.name}
 
 
 @app.post("/calibration/photo")

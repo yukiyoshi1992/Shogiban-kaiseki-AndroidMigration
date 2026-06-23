@@ -41,7 +41,6 @@ object RetrofitClient {
             .build()
     }
 
-    val photoApiService: PhotoApiService by lazy { retrofit.create(PhotoApiService::class.java) }
     val shogiApiService: ShogiApiService by lazy { retrofit.create(ShogiApiService::class.java) }
     val gameListApiService: com.example.shogiban_kaiseki_appli.gamelist.GameListApiService by lazy {
         retrofit.create(com.example.shogiban_kaiseki_appli.gamelist.GameListApiService::class.java)
