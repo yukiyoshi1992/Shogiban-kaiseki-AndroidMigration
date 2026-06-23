@@ -581,6 +581,9 @@ async def web_root():
     return RedirectResponse(url="/web/games")
 
 
+_NO_STORE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate"}
+
+
 @app.api_route("/web/games", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def web_games_list(date: str | None = None):
     """2026-06-23、実機検証で発覚：一覧ページ自体（このエンドポイント）はスマホからでも
@@ -590,6 +593,14 @@ async def web_games_list(date: str | None = None):
     （RetrofitClient.kt参照）と同じ系統の、このLAN特有の問題と疑われる。原因の真因は
     特定できていないが、回避策として一覧データをこのページ自体に直接埋め込み、JSからの
     追加fetchを行わない構成に変更した（日付フィルタも素のページ遷移にした）。
+
+    2026-06-23、8回目テスト課題⑨：JS制御を撤廃した版をデプロイしてもスマホで症状が
+    再現し続けたが、ユーザーのスクリーンショットを見ると画面下部に**削除したはずの
+    診断ログJSがまだ表示されていた**——つまりブラウザがこのページをキャッシュしており、
+    新しいサーバーコード（JS削除版）ではなく古いHTMLをそのまま再表示していたことが
+    判明した。`Cache-Control`を一切返していなかったため、ブラウザの既定のヒューリスティック
+    キャッシュ（特に戻る操作やタブ復帰時）に乗ってしまっていたと考えられる。
+    `no-store`を明示し、毎回サーバーから最新のHTMLを取得させるようにした。
     """
     games = _list_games(date)
     if games:
@@ -601,7 +612,7 @@ async def web_games_list(date: str | None = None):
     else:
         list_html = '<div id="list" class="empty">対局が見つかりません</div>'
     date_attr = f' value="{html_escape(date)}"' if date else ""
-    return f"""<!DOCTYPE html>
+    html = f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>棋譜一覧</title>{_WEB_STYLE}</head>
@@ -612,6 +623,7 @@ async def web_games_list(date: str | None = None):
 {list_html}
 {_WEB_NAV_SCRIPT}
 </body></html>"""
+    return HTMLResponse(content=html, headers=_NO_STORE_HEADERS)
 
 
 @app.api_route("/web/games/{game_id}", methods=["GET", "HEAD"], response_class=HTMLResponse)
@@ -624,7 +636,12 @@ async def web_game_detail(game_id: str):
     毎回405 Method Not Allowedで弾かれていた。実機ログで確認済み。これが「2回タップ
     しないと遷移しない」（課題⑨）の真因だった可能性が高い——probeが毎回確実に失敗する
     ので、毎回リトライの末に約2秒待ってからフォールバック遷移する動きになっていたはず。
-    methods=["GET", "HEAD"]を明示してHEADも受け付けるようにした。"""
+    methods=["GET", "HEAD"]を明示してHEADも受け付けるようにした。
+
+    2026-06-23、8回目テスト課題⑨：`Cache-Control`を返していなかったため、ブラウザが
+    このページをキャッシュし、サーバー側を新しいコードに更新してもスマホでは古いHTML
+    （削除したはずのJSを含む）が再表示され続ける事象が発覚（`web_games_list`の同日付の
+    docstring参照）。`no-store`を明示した。"""
     kif = _get_game_kif(game_id)
     if kif is None:
         body = "<h1>対局が見つかりません</h1>"
@@ -634,7 +651,7 @@ async def web_game_detail(game_id: str):
         # </script>でHTMLが途中で切れないよう、念のため"</"をエスケープしてから埋め込む
         kif_js_literal = json.dumps(kif).replace("</", "<\\/")
     game_id_js_literal = json.dumps(game_id).replace("</", "<\\/")
-    return f"""<!DOCTYPE html>
+    html = f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>棋譜詳細</title>{_WEB_STYLE}</head>
@@ -681,3 +698,4 @@ document.getElementById('copyBtn').addEventListener('click', async () => {{
 </script>
 {_WEB_NAV_SCRIPT}
 </body></html>"""
+    return HTMLResponse(content=html, headers=_NO_STORE_HEADERS)
