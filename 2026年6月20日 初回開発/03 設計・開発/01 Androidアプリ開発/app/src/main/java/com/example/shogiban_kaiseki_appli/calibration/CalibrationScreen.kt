@@ -112,6 +112,14 @@ fun CalibrationScreen(
     // （タップ精度確認）ではなく「このまま進める/手動タップで直す」（不一致の選択）表示にする。
     var isMismatchChoice by remember { mutableStateOf(false) }
     var pendingMismatchCount by remember { mutableStateOf(0) }
+    // 7回目UAT課題⑥再々テスト：赤丸自動検出が信頼できない環境（このセッション中に1度でも
+    // 手動キャリブレーションが必要だった）で「駒を直して再撮影」すると、新しい写真でも
+    // 自動検出が再び失敗し、毎回手動タップをやり直す羽目になるという指摘。4隅の物理的な
+    // 位置はカメラを動かさない限り写真が変わっても同じなので、直前の手動タップ位置を
+    // 画像サイズに対する比率で覚えておき、再撮影後は自動検出を試さず直接その比率を新しい
+    // 写真に適用してグリッド確認画面まで進める（カメラが動いていた場合はグリッド確認画面で
+    // 気づき、そこから「手動キャリブレーション」へ入り直せるので、今までより悪化はしない）。
+    var lastManualTapRatios by remember { mutableStateOf<List<Pair<Double, Double>>?>(null) }
 
     fun resetToCamera() {
         phase = CalibPhase.CAMERA
@@ -240,8 +248,19 @@ fun CalibrationScreen(
                 capturedBitmap = bitmap
                 originalSize = size
                 tapPoints = emptyList()
-                phase = CalibPhase.AUTO_SUBMITTING
-                handleAutoResult(file)
+                // 7回目UAT課題⑥再々テスト：このセッション中に既に手動キャリブレーションが
+                // 必要だった（＝自動検出が信頼できない環境）場合、再撮影のたびに自動検出から
+                // やり直すのは冗長という指摘。直前の手動タップ位置（比率）が残っていれば、
+                // 自動検出を試さず直接その位置を新しい写真に適用してグリッド確認画面まで進める。
+                val reuse = lastManualTapRatios
+                if (reuse != null) {
+                    phase = CalibPhase.SUBMITTING
+                    val scaled = reuse.map { (rx, ry) -> listOf(rx * size.width, ry * size.height) }
+                    handleManualResult(file, scaled)
+                } else {
+                    phase = CalibPhase.AUTO_SUBMITTING
+                    handleAutoResult(file)
+                }
             }
         )
 
@@ -265,6 +284,9 @@ fun CalibrationScreen(
                         (p.y / bmp.height * originalSize.height).toDouble()
                     )
                 }
+                // 7回目UAT課題⑥再々テスト：次回以降の再撮影で再利用するため、画像サイズに
+                // 対する比率で覚えておく。
+                lastManualTapRatios = scaled.map { it[0] / originalSize.width to it[1] / originalSize.height }
                 handleManualResult(capturedFile!!, scaled)
             }
         )
