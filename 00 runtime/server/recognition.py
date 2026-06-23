@@ -131,16 +131,28 @@ def save_grid_overlay(img, M, out_path, grid_size=GRID_SIZE, cell_px=CELL_PX):
     cv2.imencode(".png", vis)[1].tofile(str(out_path))
 
 
-def grid_overlay_jpeg_bytes(img, M, grid_size=GRID_SIZE, cell_px=CELL_PX):
+def grid_overlay_jpeg_bytes(img, M, grid_size=GRID_SIZE, cell_px=CELL_PX, mismatches=None):
     """save_grid_overlayと同じ緑グリッド重畫画像をファイルに保存せずJPEGバイト列として返す。
     2026-06-22、UAT課題②：手動タップ後に「マスが正しく取れているか」を人間が目視確認する
     画面用（前PJ同様の緑線オーバーレイ）。APIレスポンスに直接載せて返すための変種。
     PNGだと約1.5MBになりレスポンスが重いため、JPEG（quality=85）で約7分の1に圧縮する
     （緑線は太く塗っているため、JPEG圧縮による劣化があっても目視確認の用途には十分）。
+
+    7回目UAT課題①：不一致件数の数字だけでは「どこが」間違っているか分かりづらいという
+    指摘を受け、`compare_to_board`が返す`[(row, col, expected, got), ...]`を渡せば、
+    該当マスを半透明の赤色で塗って強調できるようにした（mismatches省略時は従来通り
+    緑グリッドのみ）。
     """
     warped = warp_board(img, M)
     vis = warped.copy()
     side = cell_px * grid_size
+    if mismatches:
+        overlay = vis.copy()
+        for row, col, _expected, _got in mismatches:
+            x1, y1 = col * cell_px, row * cell_px
+            cv2.rectangle(overlay, (x1, y1), (x1 + cell_px, y1 + cell_px), (0, 0, 255), -1)
+        alpha = 0.4
+        vis = cv2.addWeighted(overlay, alpha, vis, 1 - alpha, 0)
     for i in range(grid_size + 1):
         cv2.line(vis, (0, i * cell_px), (side, i * cell_px), (0, 200, 0), 2)
         cv2.line(vis, (i * cell_px, 0), (i * cell_px, side), (0, 200, 0), 2)

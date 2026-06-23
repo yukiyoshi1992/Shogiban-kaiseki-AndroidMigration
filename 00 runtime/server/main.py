@@ -289,7 +289,9 @@ async def calibration_photo(
     session.pending_resume_start_time = resume_start_time
     session.pending_resume_game_id = resume_game_id
 
-    overlay_b64 = base64.b64encode(recognition.grid_overlay_jpeg_bytes(img, matrix)).decode("ascii")
+    overlay_b64 = base64.b64encode(
+        recognition.grid_overlay_jpeg_bytes(img, matrix, mismatches=mismatches)
+    ).decode("ascii")
     t_end = time.perf_counter()
     _log(f"[timing] body_read={t_body_read-t_start:.2f}s decode={t_decode-t_body_read:.2f}s "
          f"save={t_save-t_decode:.2f}s calib={t_calib-t_save:.2f}s predict={t_predict-t_calib:.2f}s "
