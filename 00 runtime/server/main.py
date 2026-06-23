@@ -595,30 +595,30 @@ _WEB_STYLE = """
 # 2026-06-23、続報：5秒版を実機検証した結果、症状自体は解決したが
 # （ページ読み込みからの経過時間が真因という説を実証）、ページ遷移するたびに
 # 毎回5秒待たされるのはユーザビリティとして悪いとの指摘。レンダラーの「温まり」は
-# おそらくタブを開いている間は持続する一回限りのコストと推測されるため、
-# `sessionStorage`（タブを閉じるまで保持、別タブ・別セッションでは引き継がれない）
-# に「もう温まった」フラグを記録し、**そのタブで最初の1回だけ**待機オーバーレイを
-# 表示し、以降の遷移ではすぐにタップできるようにした。
+# タブを開いている間は持続する一回限りのコストと推測し、`sessionStorage`に
+# フラグを記録して最初の1回だけ待機する方式を試したが、**これは誤りと実機で
+# 判明**——通常のページ遷移（フルページロード）では毎回レンダラーが新規に
+# 立ち上がるため、warmupコストは1ページごとに毎回発生する。一旦、確実に動作する
+# 「毎回待つ」方式に戻す。
+#
+# また、ユーザーから鋭い指摘：「2回連続タップなら1秒未満で直るのに、なぜ受動的に
+# 待つ場合は5秒も必要なのか」——これは矛盾しており、「経過時間そのもの」ではなく
+# 「タッチイベントが実際に1回発生すること自体」が何かをすぐに起動するきっかけに
+# なっていて、その起動自体は1秒もかからない可能性が高い。5秒という数字は検証して
+# 決めた値ではなく、ユーザーの最初の体感（「5秒くらい」）をそのまま採用した
+# 当てずっぽうの値。**実際に必要な最小時間をユーザーに計測してもらっている最中**
+# （1秒・2秒・3秒…と段階的に試す）。結果が出たら数値を見直す。
 _WEB_NAV_SCRIPT = """
 <div id="shogiban-ready-overlay" style="position:fixed;inset:0;background:rgba(250,250,250,0.92);
      z-index:9999;display:flex;align-items:center;justify-content:center;
      font-family:sans-serif;color:#666;font-size:14px;">読み込み中...しばらくお待ちください</div>
 <script>
-(function () {
-  var WARMED_KEY = 'shogibanWarmedUp';
-  if (sessionStorage.getItem(WARMED_KEY)) {
+window.addEventListener('load', function () {
+  setTimeout(function () {
     var el = document.getElementById('shogiban-ready-overlay');
     if (el) el.remove();
-    return;
-  }
-  window.addEventListener('load', function () {
-    setTimeout(function () {
-      var el = document.getElementById('shogiban-ready-overlay');
-      if (el) el.remove();
-      sessionStorage.setItem(WARMED_KEY, '1');
-    }, 5000);
-  });
-})();
+  }, 5000);
+});
 </script>
 """
 
