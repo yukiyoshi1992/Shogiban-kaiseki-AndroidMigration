@@ -598,10 +598,13 @@ _WEB_NAV_SCRIPT = """
      font-family:sans-serif;color:#666;font-size:14px;">読み込み中...しばらくお待ちください</div>
 <script>
 window.addEventListener('load', function () {
+  // 2026-06-23、ユーザーの実機検証：「5秒くらい待つと直る」「2秒以内に2回連続
+  // タッチでも直る」（操作なしで待つ場合と、タップが挟まる場合とで必要時間が
+  // 違う可能性があるため、安全側を取って待機オーバーレイは5秒に設定）
   setTimeout(function () {
     var el = document.getElementById('shogiban-ready-overlay');
     if (el) el.remove();
-  }, 2000);
+  }, 5000);
 });
 </script>
 """
