@@ -592,20 +592,33 @@ _WEB_STYLE = """
 # オーバーレイを表示し、ユーザーが「まだ早い」と視覚的にわかるようにした上で、
 # オーバーレイが消えるタイミング（＝レンダラーが十分な時間動いた後）で初めて
 # タップを受け付けるようにする。
+# 2026-06-23、続報：5秒版を実機検証した結果、症状自体は解決したが
+# （ページ読み込みからの経過時間が真因という説を実証）、ページ遷移するたびに
+# 毎回5秒待たされるのはユーザビリティとして悪いとの指摘。レンダラーの「温まり」は
+# おそらくタブを開いている間は持続する一回限りのコストと推測されるため、
+# `sessionStorage`（タブを閉じるまで保持、別タブ・別セッションでは引き継がれない）
+# に「もう温まった」フラグを記録し、**そのタブで最初の1回だけ**待機オーバーレイを
+# 表示し、以降の遷移ではすぐにタップできるようにした。
 _WEB_NAV_SCRIPT = """
 <div id="shogiban-ready-overlay" style="position:fixed;inset:0;background:rgba(250,250,250,0.92);
      z-index:9999;display:flex;align-items:center;justify-content:center;
      font-family:sans-serif;color:#666;font-size:14px;">読み込み中...しばらくお待ちください</div>
 <script>
-window.addEventListener('load', function () {
-  // 2026-06-23、ユーザーの実機検証：「5秒くらい待つと直る」「2秒以内に2回連続
-  // タッチでも直る」（操作なしで待つ場合と、タップが挟まる場合とで必要時間が
-  // 違う可能性があるため、安全側を取って待機オーバーレイは5秒に設定）
-  setTimeout(function () {
+(function () {
+  var WARMED_KEY = 'shogibanWarmedUp';
+  if (sessionStorage.getItem(WARMED_KEY)) {
     var el = document.getElementById('shogiban-ready-overlay');
     if (el) el.remove();
-  }, 5000);
-});
+    return;
+  }
+  window.addEventListener('load', function () {
+    setTimeout(function () {
+      var el = document.getElementById('shogiban-ready-overlay');
+      if (el) el.remove();
+      sessionStorage.setItem(WARMED_KEY, '1');
+    }, 5000);
+  });
+})();
 </script>
 """
 
