@@ -39,7 +39,7 @@ import numpy as np
 import shogi
 import shogi.KIF
 from fastapi import FastAPI, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 import recognition
 from session import GameState, session
@@ -506,3 +506,135 @@ async def get_game(game_id: str):
         if _strip_kif_prefix(path.stem) == game_id:
             return {"id": game_id, "kif": path.read_text(encoding="utf-8")}
     raise HTTPException(404, "game not found")
+
+
+# ===== Webブラウザ用の棋譜一覧・閲覧画面（追加要望、2026-06-23） =====
+# Androidアプリの棋譜一覧（GameListScreen.kt）と同じGET /games・GET /games/{id}を
+# そのままブラウザから叩くだけの薄いHTML画面。ユーザー要望通り「対局再開」は持たせない
+# （PC等のブラウザから中断局を再開する運用は想定していないため、再開ボタンの表示自体を
+# 省略——既存の/calibration/photo等の対局フローには一切手を加えていない）。
+# 共有・コピーはAndroidの共有シートに相当する操作がブラウザにはないため、
+# navigator.share()（対応ブラウザのみ、OSの共有シートが出る）→未対応ならクリップボード
+# コピーにフォールバックする、という2段構成にした。
+_WEB_STYLE = """
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 16px; background: #fafafa; color: #222; }
+  h1 { font-size: 1.2rem; }
+  .game-row { display: flex; justify-content: space-between; align-items: center;
+              padding: 10px 12px; margin-bottom: 6px; background: #fff; border-radius: 6px;
+              box-shadow: 0 1px 2px rgba(0,0,0,0.1); text-decoration: none; color: #222; }
+  .game-row:hover { background: #f0f0f0; }
+  input[type=date] { padding: 6px; margin-bottom: 12px; }
+  button { padding: 8px 14px; margin-right: 8px; margin-top: 8px; cursor: pointer; }
+  pre { background: #fff; padding: 12px; border-radius: 6px; white-space: pre-wrap;
+        word-break: break-all; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+  .back-link { display: inline-block; margin-bottom: 12px; }
+  .empty { color: #888; padding: 12px; }
+</style>
+"""
+
+
+@app.get("/web")
+async def web_root():
+    return RedirectResponse(url="/web/games")
+
+
+@app.get("/web/games", response_class=HTMLResponse)
+async def web_games_list():
+    return f"""<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>棋譜一覧</title>{_WEB_STYLE}</head>
+<body>
+<h1>棋譜一覧</h1>
+<input type="date" id="dateFilter">
+<div id="list" class="empty">読み込み中...</div>
+<script>
+async function load() {{
+  const date = document.getElementById('dateFilter').value;
+  const url = date ? `/games?date=${{date}}` : '/games';
+  const res = await fetch(url);
+  const data = await res.json();
+  const list = document.getElementById('list');
+  if (!data.games || data.games.length === 0) {{
+    list.className = 'empty';
+    list.textContent = '対局が見つかりません';
+    return;
+  }}
+  list.className = '';
+  list.innerHTML = '';
+  for (const g of data.games) {{
+    const a = document.createElement('a');
+    a.className = 'game-row';
+    a.href = `/web/games/${{encodeURIComponent(g.id)}}`;
+    a.textContent = g.filename;
+    list.appendChild(a);
+  }}
+}}
+document.getElementById('dateFilter').addEventListener('change', load);
+load();
+</script>
+</body></html>"""
+
+
+@app.get("/web/games/{game_id}", response_class=HTMLResponse)
+async def web_game_detail(game_id: str):
+    return f"""<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>棋譜詳細</title>{_WEB_STYLE}</head>
+<body>
+<a class="back-link" href="/web/games">← 一覧に戻る</a>
+<h1 id="title">読み込み中...</h1>
+<pre id="kif"></pre>
+<div>
+  <button id="shareBtn">共有</button>
+  <button id="copyBtn">コピー（分析Tool貼付用）</button>
+</div>
+<div id="msg"></div>
+<script>
+const gameId = decodeURIComponent(location.pathname.split('/').pop());
+let kifText = '';
+async function load() {{
+  const res = await fetch(`/games/${{encodeURIComponent(gameId)}}`);
+  if (!res.ok) {{
+    document.getElementById('title').textContent = '対局が見つかりません';
+    return;
+  }}
+  const data = await res.json();
+  kifText = data.kif;
+  document.getElementById('title').textContent = gameId;
+  document.getElementById('kif').textContent = kifText;
+}}
+// このサーバーはLAN内のhttp（暗号化なし）でアクセスする運用のため、navigator.clipboardは
+// 「セキュアコンテキスト」（https or localhost）でないブラウザでは使えない可能性がある。
+// 使えない場合は非表示textarea+document.execCommand('copy')（非推奨だが平文httpでも動く）に
+// フォールバックする。
+async function copyText(text) {{
+  if (navigator.clipboard && window.isSecureContext) {{
+    await navigator.clipboard.writeText(text);
+    return;
+  }}
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+}}
+document.getElementById('shareBtn').addEventListener('click', async () => {{
+  if (navigator.share) {{
+    try {{ await navigator.share({{ title: gameId, text: kifText }}); return; }} catch (e) {{ /* キャンセル等は無視 */ }}
+  }}
+  await copyText(kifText);
+  document.getElementById('msg').textContent = 'お使いのブラウザは共有に対応していないため、クリップボードにコピーしました';
+}});
+document.getElementById('copyBtn').addEventListener('click', async () => {{
+  await copyText(kifText);
+  document.getElementById('msg').textContent = 'コピーしました';
+}});
+load();
+</script>
+</body></html>"""

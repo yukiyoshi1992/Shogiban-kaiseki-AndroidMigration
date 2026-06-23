@@ -347,6 +347,18 @@ User reproduced the previously-deferred "Bluetooth shutter causes a spurious cap
 - **④（棋譜一覧で【対局中止】が【対局完了】の下にまとめられ、時系列順になっていない）**: `00 runtime/server/main.py`の`list_games()`が`sorted(RUNTIME_GAMES_DIR.glob("*.kif"), reverse=True)`で**ファイル名の生の文字列**（先頭の`【対局中】`等の状態プレフィックス込み）をソートキーにしていたため、文字コード順で状態プレフィックスごとにブロック化され、同じ日に完了/中止が混在する対局が時系列を無視してグルーピングされていた。**Fix**: 新しいヘルパー`_kif_chronological_key(stem)`（ファイル名から数字以外を`re.sub(r"\D", "", stem)`で除去——状態プレフィックスの括弧文字も"game_"等の英字も数字以外なので自動的に落ちる）を`sorted()`の`key=`に指定。新形式（`yyyyMMdd_hh-mm`→12桁）・旧形式（`game_YYYYMMDD_HHMMSS`→14桁）どちらも数字列の文字列比較がそのまま時系列比較になることを確認済み（実際の`runtime/games/`内18件のファイルに対して`key`関数を直接実行し、出力順が状態プレフィックスに関わらず正しく日時降順になることを確認——新形式は全て旧形式より新しい時期に作られたものなので、新形式が全件上に来る現在の並びも実際の時系列と一致している）。Android側（`GameListScreen.kt`）はサーバが返した順序をそのまま表示するだけなので変更不要。
 - **両方とも未検証**（実機・Gradle未確認、brace/paren数と`py_compile`のみ確認）。次回ユーザーに、③不一致画面で文字が読めるか、④棋譜一覧が時系列順に見えるか、を確認してもらう必要あり。
 
+## Webブラウザからの棋譜閲覧・共有（追加要望、2026-06-23）
+
+ユーザーから「棋譜一覧画面をWebブラウザからもアクセスできるようにしたい。共有・コピーもできるとよいが、対局再開は不要」という追加要望（Discord、CNN処理オンデバイス化PJより優先指定）。
+
+`00 runtime/server/main.py`に`GET /web`（`/web/games`へリダイレクト）・`GET /web/games`（一覧、日付フィルタ付き）・`GET /web/games/{game_id}`（KIF詳細＋共有/コピー）を追加。既存の`GET /games`/`GET /games/{game_id}`（Androidアプリも使っているJSON API）をそのままブラウザのJSから`fetch`するだけの薄いHTML/JS（テンプレートエンジン等の新規依存なし、`HTMLResponse`で文字列を直接返すだけ）。Androidの「対局再開」ボタンに相当するものは意図的に実装していない（要望通り）。
+
+**共有・コピーの実装判断**：
+- 「共有」ボタンは`navigator.share()`（対応ブラウザでOSの共有シートが出る、Android Chromeなど）を試し、未対応ブラウザではクリップボードコピーにフォールバックする。
+- このサーバーはLAN内の平文HTTP運用（`usesCleartextTraffic="true"`と同じ前提）のため、`navigator.clipboard`はブラウザの「セキュアコンテキスト」制限（https or localhostのみ）に引っかかって使えない可能性がある——これを見越して、非表示`<textarea>`+`document.execCommand('copy')`（非推奨API だが平文HTTPでも動く）へのフォールバックを両方のボタンに実装済み。
+
+**動作確認**：FastAPIの`TestClient`で実際にアプリを起動し（モデル読み込み・ウォームアップも実行される）、`/web`のリダイレクト・`/web/games`/`web/games/{id}`の200応答とHTML/JSの中身（f-stringのブレース二重化が正しく単一ブレースとして出力されること）を確認。既存の`/games`/`/games/{id}`が引き続き正常に動くことも回帰確認済み。**実機（ブラウザ）でのクリック動作・共有/コピーの実際の挙動は未確認**——次はPCまたはスマホのブラウザから`http://192.168.0.24:8000/web`にアクセスして確認する必要がある。
+
 ## UATシナリオ2種、対局再開フローと①の解決状況を反映（2026-06-23）
 
 `04 UAT/generate_test_scenarios.py`（→`総合テストシナリオ.xlsx`）と`generate_user_flow_scenarios.py`（→`UATシナリオ.xlsx`）を更新・再実行（手編集はしない、プロジェクトの既存方針通り）：
