@@ -605,7 +605,7 @@ async def web_root():
     return RedirectResponse(url="/web/games")
 
 
-@app.get("/web/games", response_class=HTMLResponse)
+@app.api_route("/web/games", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def web_games_list(date: str | None = None):
     """2026-06-23、実機検証で発覚：一覧ページ自体（このエンドポイント）はスマホからでも
     届くが、ページ内のJSが続けて発行する2回目の通信（fetch('/games')）がスマホからだと
@@ -638,10 +638,17 @@ async def web_games_list(date: str | None = None):
 </body></html>"""
 
 
-@app.get("/web/games/{game_id}", response_class=HTMLResponse)
+@app.api_route("/web/games/{game_id}", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def web_game_detail(game_id: str):
     """web_games_listと同じ理由で、KIF本文もページ内JSのfetchに頼らずこのページ自体に
-    直接埋め込む構成にした（2026-06-23）。"""
+    直接埋め込む構成にした（2026-06-23）。
+
+    2026-06-23、8回目テスト課題⑪：このルートと web_games_list が@app.get（GETのみ登録）
+    だったため、一覧クリック時にブラウザが送るHEAD probe（_WEB_NAV_SCRIPT参照）が
+    毎回405 Method Not Allowedで弾かれていた。実機ログで確認済み。これが「2回タップ
+    しないと遷移しない」（課題⑨）の真因だった可能性が高い——probeが毎回確実に失敗する
+    ので、毎回リトライの末に約2秒待ってからフォールバック遷移する動きになっていたはず。
+    methods=["GET", "HEAD"]を明示してHEADも受け付けるようにした。"""
     kif = _get_game_kif(game_id)
     if kif is None:
         body = "<h1>対局が見つかりません</h1>"

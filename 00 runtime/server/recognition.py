@@ -168,7 +168,6 @@ RED_UPPER1 = np.array([10, 255, 255])
 RED_LOWER2 = np.array([165, 120, 80])
 RED_UPPER2 = np.array([180, 255, 255])
 CIRC_MIN = 0.55
-BOARD_RADIUS_RATIO = 0.006
 
 
 def detect_red_circles(img):
@@ -200,6 +199,41 @@ def _convex_quad_area(pts):
     return cv2.contourArea(hull)
 
 
+MAX_CORNER_ANGLE_DEVIATION_DEG = 25.0
+
+
+def _quad_angle_deviation(pts):
+    """4点（任意の順序）をorder_pointsで整列した上で、4つの内角が90°から
+    どれだけズレているかの最大値を返す。盤の角は長方形に近いはずなので、
+    崩壊した台形（背景の物体を誤って角と認識した場合に起きやすい）を
+    検出するための指標。"""
+    ordered = order_points(list(pts))
+    vecs = [np.array(p, dtype=float) for p in ordered]
+    n = len(vecs)
+    max_dev = 0.0
+    for i in range(n):
+        prev_p, cur_p, next_p = vecs[(i - 1) % n], vecs[i], vecs[(i + 1) % n]
+        v1, v2 = prev_p - cur_p, next_p - cur_p
+        n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
+        if n1 < 1e-6 or n2 < 1e-6:
+            return 180.0
+        cos_a = max(-1.0, min(1.0, float(np.dot(v1, v2) / (n1 * n2))))
+        angle = np.degrees(np.arccos(cos_a))
+        max_dev = max(max_dev, abs(angle - 90.0))
+    return max_dev
+
+
+def _best_quad_by_area(points, max_angle_deviation=MAX_CORNER_ANGLE_DEVIATION_DEG):
+    """候補点から4点を選ぶ全組み合わせを面積の大きい順に試し、内角が90°に近い
+    （長方形らしい）最初の組み合わせを返す。面積最大のコンボが崩壊した台形だった
+    場合、それを採用せず次善のコンボを試す。"""
+    combos = sorted(combinations(points, 4), key=_convex_quad_area, reverse=True)
+    for combo in combos:
+        if _quad_angle_deviation(combo) <= max_angle_deviation:
+            return list(combo)
+    return None
+
+
 def select_board_corners(circles, shape, img=None):
     """検出された赤丸候補から、盤の4隅とみなす4点を選ぶ。
 
@@ -220,34 +254,52 @@ def select_board_corners(circles, shape, img=None):
     白飛びに典型的な値だった）。色のHSVしきい値自体は他の3点と同じ値で一部のピクセルは通って
     いるが、彩度が低い分マスクが薄くまばらになり、モルフォロジー処理や面積下限フィルタを
     生き残れるだけの大きさが無かった。詳細は`_predict_missing_corner`/`_find_weak_marker_near`参照。
+
+    2026-06-23、8回目テスト課題⑩：円形度を0.45まで緩める処理と半径下限フィルタ（rth）を撤去。
+    実際の失敗写真4枚を解析した結果、この緩和のせいで盤の角ではない無関係な赤い物体
+    （円形度が低い大きな赤色塊）が候補に混入し、本来3点しか強い候補が無いはずの場面で
+    「4点ちょうど」に見えてしまい、上記の3点救済ロジックが一度も発動しないまま
+    無関係な物体を4隅の1つとして採用してしまうケースを引き起こしていた（見た目は
+    「キャリブレーション成功」だが実際は81マス中45マス前後が不一致という、嘘の成功）。
+    強い候補（CIRC_MIN以上）だけで4点に満たない場合は、緩和して候補を増やすのではなく、
+    3点救済ロジック（白飛びした本物のマーカーを狭い範囲で再探索する、既存の正しい対処）に
+    回すほうが安全と判断。
+    あわせて、選んだ4点の内角が90°から大きくズレている場合（崩壊した台形）はそのコンボを
+    不採用にし、次に面積が大きいコンボを試す角度チェックを追加（`_best_quad_by_area`）。
+    円形度フィルタだけでは想定しきれない誤選択を、形状という独立した指標で二重に防ぐ。
+
+    2026-06-23、課題⑩の回帰修正：上記の「強い候補（CIRC_MIN以上）だけで4点に満たない場合は
+    3点救済に回す」を一度実装したところ、画像の隅でマーカーが画面端に切れて円形度が落ちる
+    （白飛びとは別の劣化要因。実測：本物のマーカーでも円形度0.40〜0.55程度まで下がるケースが
+    過去の実写真にあった）ケースで、3点救済の入力自体が3点に満たず（強い候補が2点しか残らない）
+    全滅してしまう本物の回帰が発生した（過去の良好な実写真4枚で確認）。
+    そのため、3点救済への入力だけは従来通り円形度0.45まで緩めた候補から取る（救済ロジック自体は
+    `_find_weak_marker_near`が独自に狭い範囲で再探索するため、緩めた3点の円形度が多少低くても
+    実害はない）。緩めた候補が3点を超える場合は円形度が高い方から3点に絞る（無関係な物体が
+    混入していても、最も「丸い」3点を残せば実質的に弾かれる）。緩めた候補をそのまま4点直接
+    採用には絶対に使わない（これが元の課題⑩の原因だったため）——必ず3点に絞ってから
+    救済ロジックに通す。
     """
-    h, w = shape[:2]
-    diag = (w ** 2 + h ** 2) ** 0.5
-    filt = [c for c in circles if c[3] >= CIRC_MIN]
-    if len(filt) < 4:
-        filt = [c for c in circles if c[3] >= 0.45]
-    rth = diag * BOARD_RADIUS_RATIO
-    cand = [c for c in filt if c[2] >= rth]
-    if len(cand) < 4:
-        cand = sorted(filt, key=lambda c: -c[2])[:max(4, len(cand))]
+    strong = [c for c in circles if c[3] >= CIRC_MIN]
 
-    if len(cand) >= 4:
-        points = [(c[0], c[1]) for c in cand]
-        best_area = -1.0
-        best_combo = None
-        for combo in combinations(points, 4):
-            area = _convex_quad_area(combo)
-            if area > best_area:
-                best_area = area
-                best_combo = combo
-        return list(best_combo) if best_combo is not None else None
+    if len(strong) >= 4:
+        points = [(c[0], c[1]) for c in strong]
+        best = _best_quad_by_area(points)
+        if best is not None:
+            return best
 
-    if len(cand) == 3 and img is not None:
-        points3 = [(c[0], c[1]) for c in cand]
+    relaxed = [c for c in circles if c[3] >= 0.45]
+    if len(relaxed) > 3:
+        relaxed = sorted(relaxed, key=lambda c: -c[3])[:3]
+
+    if len(relaxed) == 3 and img is not None:
+        points3 = [(c[0], c[1]) for c in relaxed]
         predicted = _predict_missing_corner(points3)
         weak = _find_weak_marker_near(img, predicted)
         if weak is not None:
-            return points3 + [weak]
+            combo = points3 + [weak]
+            if _quad_angle_deviation(combo) <= MAX_CORNER_ANGLE_DEVIATION_DEG:
+                return combo
 
     return None
 
