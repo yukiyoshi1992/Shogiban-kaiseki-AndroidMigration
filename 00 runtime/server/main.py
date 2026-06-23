@@ -558,76 +558,22 @@ _WEB_STYLE = """
 # 2026-06-23、7回目UAT課題⑨：一覧の項目・「一覧に戻る」リンクが1回タップしただけでは
 # 遷移せず、2回目のタップで初めて遷移する不具合。:hover起因の説（既に修正済み）では
 # 説明できず（hoverスタイルを持たないback-linkでも同じ症状）、PCでは再現しない。
-# web_games_list/web_game_detailの実装メモにある通り、このLANは「直前の通信の直後に
-# 発行した通信が時々スマホ側だけ詰まる」特性がある（OkHttp・ページ内fetch()でも確認済み）。
-# ページ読み込み（1つ目の通信）の直後にリンクをタップする（2つ目の通信）のは、まさに
-# このパターンに当たるため、1回目のタップが詰まり、少し間を置いた2回目のタップで
-# 初めて通る、という挙動と推測される。
-# 対策（2026-06-23、1回目）：document.write でページ内容自体を書き換え、history.pushState/
-# popstateも自前で処理するSPA的な方式を試したが、実機検証の結果「直らない上に戻る操作も
-# 効かなくなった」との報告があり、過剰に複雑だったため撤回した。
-# 対策（2026-06-23、2回目・現行）：ブラウザの素のページ遷移・戻る操作はそのまま一切変更せず
-# （`<a href>`のまま、history/document操作なし）、クリック時に直前リトライとして軽い
-# probe（HEADリクエスト）を試すだけにする。probeが成功した場合は通常のリンク遷移
-# （`location.href`）をそのまま行う。probeが詰まった場合は0.5秒おきに最大4回リトライし、
-# 全部失敗したら最終手段としてそのまま`location.href`へフォールバックする（今までと同じ
-# 挙動に戻るだけで、悪化はしない）。戻る/進むボタンは完全にブラウザ標準のままなので、
-# このスクリプトが原因で壊れることはない。
-_WEB_NAV_SCRIPT = """
-<div id="shogiban-nav-log" style="position:fixed;bottom:0;left:0;right:0;
-     max-height:40vh;overflow-y:auto;background:rgba(0,0,0,0.85);color:#0f0;
-     font-family:monospace;font-size:11px;padding:6px;z-index:9999;display:none;
-     white-space:pre-wrap;"></div>
-<script>
-// 2026-06-23、8回目テスト課題⑨⑪：HEAD probeを405回避後も「ロードゲージが伸びきらず
-// 遷移しない」という症状が続いたため、何が起きているか目視で追えるよう画面下部に
-// 簡易ログを表示する（uvicornのアクセスログだけではタップ後にlocation.hrefが本当に
-// 呼ばれたか・その後何が起きたかが分からないため）。
-var shogibanNavT0 = null;
-function shogibanLog(msg) {
-  var el = document.getElementById('shogiban-nav-log');
-  if (!el) return;
-  el.style.display = 'block';
-  var t = shogibanNavT0 ? (Date.now() - shogibanNavT0) + 'ms' : '0ms';
-  el.textContent += '[' + t + '] ' + msg + '\\n';
-  el.scrollTop = el.scrollHeight;
-}
-function shogibanProbeThenGo(url, attempt) {
-  attempt = attempt || 0;
-  shogibanLog('probe attempt ' + attempt + ' -> ' + url);
-  fetch(url, { method: 'HEAD', cache: 'no-store' })
-    .then(function (res) {
-      shogibanLog('probe ' + (res.ok ? 'OK' : ('status ' + res.status)));
-      if (!res.ok) throw new Error('status ' + res.status);
-      shogibanLog('calling location.href now');
-      location.href = url;
-      setTimeout(function () {
-        shogibanLog('STILL HERE 3s after location.href - navigation did not happen');
-      }, 3000);
-    })
-    .catch(function (err) {
-      shogibanLog('probe failed: ' + err);
-      if (attempt < 4) {
-        setTimeout(function () { shogibanProbeThenGo(url, attempt + 1); }, 500);
-      } else {
-        shogibanLog('giving up on probe, calling location.href anyway');
-        location.href = url;
-        setTimeout(function () {
-          shogibanLog('STILL HERE 3s after fallback location.href - navigation did not happen');
-        }, 3000);
-      }
-    });
-}
-document.querySelectorAll('a.game-row, a.back-link').forEach(function (a) {
-  a.addEventListener('click', function (e) {
-    e.preventDefault();
-    shogibanNavT0 = Date.now();
-    shogibanLog('tap: ' + a.getAttribute('href'));
-    shogibanProbeThenGo(a.getAttribute('href'), 0);
-  });
-});
-</script>
-"""
+# 対策1回目（document.write方式）・対策2回目（HEAD probe＋リトライ方式）は撤回済み
+# （詳細はgit履歴参照）。
+#
+# 2026-06-23、8回目テスト課題⑨⑪：HEAD 405バグ修正後も症状が続いたため、画面上に
+# 診断ログを表示してタップ後の挙動を直接観察したところ、決定的な証拠が得られた：
+# probeのfetch自体は23〜46msで毎回成功し、その直後に`location.href = url`も
+# 実際に呼ばれている（ログに記録される）にもかかわらず、3秒後も同じページに
+# 留まり続けていた——つまりこれはネットワーク（LANの詰まり）の問題ではなく、
+# **非同期コールバック（Promiseの.then）内から行うlocation.href代入が、このスマホの
+# ブラウザでは実質的に無視されている**ことが直接の原因だった。クリックを横取りして
+# fetchを挟む方式そのものが、素の同期的なリンククリック（ブラウザネイティブの遷移）が
+# 持つはずの効果を失わせていたと考えられる。
+# 対策（2026-06-23、3回目・現行）：JSによるクリック横取り・fetch probe・location.href
+# 呼び出しを全廃し、`<a href>`のみによるブラウザ標準の遷移に戻した。HEAD probeで
+# 確認した通りサーバー応答自体は速い（数十ms）ため、素のクリックで詰まる理由はない。
+_WEB_NAV_SCRIPT = ""
 
 
 @app.get("/web")
