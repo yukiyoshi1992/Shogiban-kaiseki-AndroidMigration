@@ -950,9 +950,24 @@ pointerdown -> touchstart -> pointerup -> touchend -> mousedown -> focus -> mous
 
 **真因**：ページが（パッシブな）タッチイベントリスナーを一つも持たない状態だと、一部のAndroid端末（このOPPO機含む）ではブラウザが「このページはタッチを使わないだろう」と判断し、読み込み直後の最初のタッチ入力の処理を最適化・後回しにすることがある、というモバイルWebで知られた挙動。touchstartリスナーを1つ登録するだけでこの最適化が働かなくなる。
 
-**対応**：`_WEB_NAV_SCRIPT`を`document.addEventListener('touchstart', function () {}, { passive: true, capture: true });`のみに変更（クリック横取り・fetch・location.href操作は一切なし）。commit&push済み（`0c43e32`）。**次回ユーザーに確認してもらうこと**：DevToolsの実験なし（素の状態）で、本番ページが1タップで遷移するようになったか。
+**対応**：`_WEB_NAV_SCRIPT`を`document.addEventListener('touchstart', function () {}, { passive: true, capture: true });`のみに変更。commit&push済み（`0c43e32`）。
 
-これで課題⑨は、HEAD 405・ブラウザキャッシュ・touchstartリスナー欠落という**3つの独立した原因**が積み重なっていたことが判明。当初からの「LANが2回目の通信を詰まらせる」という説は、結局どの段階にも当てはまっていなかった。
+### 課題⑨さらに続報：touchstart単独では不十分、ontouchstart併用に拡張（commit `13004ac`）
+
+ユーザーが**サーバーを再起動した上で**再検証したが、効果なし——「touchstartリスナー1つで直る」は誤りと判明。ユーザーが「スマホ 2回タッチ リンク」でWeb検索し、同種の症状を報告する記事3件を発見。いずれも**モバイルブラウザの古典的な「ホバー状態シミュレーション」問題**（タッチリスナーが一切無いページでは、ブラウザが1回目のタップを:hover表示用のシミュレーションとして処理し、2回目で初めてクリックを発火させる）として説明されていた。
+
+3記事の対処法（`window.ontouchstart`への直接代入＋`window`へのcapture/bubble両方の登録、`document`へのオプション無し登録）をすべて組み合わせて適用：
+```js
+window.ontouchstart = function () {};
+window.addEventListener('touchstart', function () {}, true);
+window.addEventListener('touchstart', function () {}, false);
+document.addEventListener('touchstart', function () {});
+```
+commit&push済み（`13004ac`）。
+
+ユーザーから「キャッシュクリアしていないから更新されなかった可能性があるのでは」と妥当な指摘あり——DevToolsのNetworkタブで「Disable cache」を有効にし、レスポンス内に`ontouchstart`が実際に含まれているか確認してから再テストするよう案内した。**次回ユーザーに確認してもらうこと**：最新コードが確実に届いている状態で1タップ遷移するか。
+
+これで課題⑨は、HEAD 405・ブラウザキャッシュ・モバイルブラウザのホバーシミュレーションという**3つの独立した原因**が積み重なっていたことが判明。当初からの「LANが2回目の通信を詰まらせる」という説は、結局どの段階にも当てはまっていなかった。
 
 ## 次回セッション開始時にやること（2026-06-23時点で最新）
 
