@@ -175,17 +175,25 @@ fun CalibrationScreen(
 
     // 手動4隅タップモード：2026-06-22、UAT課題②により変更。タップ直後にすぐ対局開始するのではなく、
     // サーバが返すグリッド線オーバーレイ（前PJ同様の緑線）を人間が目視確認する画面を挟む
-    // （4隅タップ自体の精度——透視変換が盤に正しく合っているか——の確認。手動タップは
-    // 前PJ方針通り無条件採用のため、不一致の有無に関わらずisMismatchChoiceは立てない
-    // ——常に従来通りOK/やり直すの2択）。
+    // （4隅タップ自体の精度——透視変換が盤に正しく合っているか——の確認）。
+    // 2026-06-23、7回目UAT課題⑥の再現報告で発覚：以前はここで不一致の有無に関わらず
+    // isMismatchChoiceをfalseに固定していたため、自動検出が失敗→手動キャリブレーション
+    // で撮り直さずに4隅タップだけやり直した場合、駒の配置ミス（赤枠で表示はされる、
+    // 課題①）があってもボタンは常に「やり直す/OK（対局開始）」の2択のままで、
+    // 「OK」を押すと駒を直す前の認識結果がそのまま確定してしまっていた
+    // （課題⑥と同じ「撮り直さない限り反映されない」問題が、手動タップ経由でも発生）。
+    // 自動検出と同様、実際の不一致有無（matchesTarget/mismatchCount）に応じて
+    // isMismatchChoiceを立てるように統一し、不一致がある場合は常に3択
+    // （再撮影／駒修正済,対局へ／手動キャリブレーション）と説明文言を表示するようにした。
     fun handleManualResult(file: File, points: List<List<Double>>) {
         coroutineScope.launch {
             submitCalibration(file, points, resumeGameId = resumeGameId,
                 onCalibrationFailed = { errorMessage = "サーバ側でキャリブレーションに失敗しました"; phase = CalibPhase.ERROR },
-                onPendingConfirm = { base64, _, _ ->
+                onPendingConfirm = { base64, matchesTarget, mismatchCount ->
                     val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
                     gridOverlayBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    isMismatchChoice = false
+                    isMismatchChoice = !matchesTarget
+                    pendingMismatchCount = mismatchCount
                     phase = CalibPhase.GRID_CONFIRM
                 },
                 onError = { msg, code -> handleError(msg, code) }
