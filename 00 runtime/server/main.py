@@ -611,7 +611,16 @@ _WEB_STYLE = """
 # 単独登録（capture:true、passive:trueのみ）は実機再検証で効果がなかったため、
 # 3件の記事で使われていた書き方（`window.ontouchstart`プロパティへの直接代入、
 # `window`へのcapture/bubble両方での`addEventListener`登録、`document`への
-# オプション無し`addEventListener`登録）をすべて組み合わせて適用する。
+# オプション無し`addEventListener`登録）をすべて組み合わせて適用したが、それでも
+# 実機で効果がなかった。
+#
+# 続報・修正：記事の1つ（note記事）が実際に使っていたのは`<body ontouchstart="">`
+# というHTML属性そのものだった。これは`document.body.ontouchstart`プロパティを
+# 設定するのと同じ効果で、`window.ontouchstart`とは**別のオブジェクトのプロパティ**
+# （bodyタグのonXXX属性のうちwindowへ転送される特別な一部——onload/onerror等——に
+# `ontouchstart`は含まれない）であり、JSで`window.ontouchstart`を設定しても
+# `<body ontouchstart="">`を再現できていなかった。`<body>`タグに直接この属性を
+# 追加して修正。
 _WEB_NAV_SCRIPT = """
 <script>
 window.ontouchstart = function () {};
@@ -662,7 +671,7 @@ async def web_games_list(date: str | None = None):
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>棋譜一覧</title>{_WEB_STYLE}</head>
-<body>
+<body ontouchstart="">
 <h1>棋譜一覧</h1>
 <input type="date" id="dateFilter"{date_attr}
        onchange="location.href = '/web/games' + (this.value ? '?date=' + this.value : '')">
@@ -701,7 +710,7 @@ async def web_game_detail(game_id: str):
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>棋譜詳細</title>{_WEB_STYLE}</head>
-<body>
+<body ontouchstart="">
 <a class="back-link" href="/web/games">← 一覧に戻る</a>
 {body}
 <div>
