@@ -76,9 +76,16 @@ private sealed class MoveResult {
     data class NetworkError(val message: String) : MoveResult()
 }
 
-/** 通信エラー時の再試行回数・間隔。WiFiの一時的な切断を乗り切れる程度に短く設定。 */
-private const val NETWORK_RETRY_MAX = 3
-private const val NETWORK_RETRY_DELAY_MS = 1500L
+/** 通信エラー時の再試行回数・間隔。WiFiの一時的な切断を乗り切れる程度に短く設定。
+ * 2026-06-23、7回目UAT課題④：約2秒間隔の連続撮影でほぼ毎回通信エラーになる事象を確認。
+ * サーバログでは2回成功直後、3回目以降の/moveが一度もサーバに届かないまま自動中止されており、
+ * 同日見つけたこのLAN特有の「直前の通信の直後に発行した通信が時々詰まる」現象（Web版の
+ * 一覧読み込み・リンク遷移と同系統、真因は未特定）の影響と考えられる。撮影キュー自体は
+ * 順番を保ったまま即座に受け付ける設計（初回UAT指摘への対応）を変えずに、再試行の余裕を
+ * 増やして吸収できるようにする方針で、再試行回数・間隔の両方を引き上げた
+ * （3回×1.5秒=最大4.5秒の余裕 → 5回×2秒=最大10秒）。*/
+private const val NETWORK_RETRY_MAX = 5
+private const val NETWORK_RETRY_DELAY_MS = 2000L
 
 /**
  * 対局画面：カメラプレビュー常時表示、シャッター（オンスクリーンボタン or Bluetoothシャッター=

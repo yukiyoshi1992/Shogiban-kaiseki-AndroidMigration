@@ -475,7 +475,11 @@ private fun TappingStep(
     val currentPoints = rememberUpdatedState(points)
     val currentMeasuredSize = rememberUpdatedState(measuredSize)
 
-    Column(modifier = modifier.fillMaxSize()) {
+    // 7回目UAT課題⑤：6回目UAT課題③（GridConfirmStep）と同じ理由——CalibrationScreenは
+    // MainActivity側でBoxに重ねられ、画面右上に「過去の対局」ボタンが常時表示される
+    // （ShogiAppFlow参照）。このColumnが画面上端から始まると、先頭の文言がそのボタンと
+    // 重なって読めなくなっていたため、ボタンの占有高さを避けるだけの上部余白を確保する。
+    Column(modifier = modifier.fillMaxSize().padding(top = 64.dp)) {
         if (hint.isNotEmpty()) {
             Text(text = hint, modifier = Modifier.padding(8.dp))
         }
