@@ -272,20 +272,16 @@ fun CalibrationScreen(
             mismatchCount = pendingMismatchCount,
             isResume = resumeGameId != null,
             onOk = { handleGridConfirmOk() },
-            onRetry = {
-                if (isMismatchChoice) {
-                    // 7回目UAT課題②：不一致（S-02b/S-03）の実態は駒の配置ミスであることが
-                    // 多く、手動タップ（透視変換のやり直し）では解決しないため、「再撮影」
-                    // として撮影からやり直す（同じ写真への手動タップには戻さない）。
-                    resetToCamera()
-                } else {
-                    // 2026-06-22、2回目UAT課題③：自動検出成功後のグリッド確認でNG
-                    // （4隅タップ精度の問題）だった場合はこちら。同じ撮影済み写真への
-                    // 手動タップで直せるため撮り直しは不要。
-                    tapPoints = emptyList()
-                    tappingHint = "グリッドが盤に正しく重なっていませんでした。盤の四隅をタップしてください"
-                    phase = CalibPhase.TAPPING
-                }
+            // 7回目UAT課題②：不一致（S-02b/S-03）の実態は駒の配置ミスであることが多いため、
+            // 撮り直しが必要な場合の「再撮影」は撮影からやり直す（同じ写真への手動タップには戻さない）。
+            onRetake = { resetToCamera() },
+            // 7回目UAT課題②再テスト：盤と枠線のズレ（透視変換自体の問題）が原因と思われる場合
+            // 用に、同じ撮影済み写真への手動4隅タップへ戻る選択肢を追加（isMismatchChoice=trueでも
+            // 選べるようにした）。2026-06-22、2回目UAT課題③の「やり直す」と同じ処理。
+            onManualCalibration = {
+                tapPoints = emptyList()
+                tappingHint = "グリッドが盤に正しく重なっていませんでした。盤の四隅をタップしてください"
+                phase = CalibPhase.TAPPING
             }
         )
 
@@ -696,8 +692,10 @@ private suspend fun forceResetSession() {
  *   （同じ撮影写真への再タップ、撮り直しは不要）。
  * - isMismatchChoice=true（5回目UAT課題④で追加）：赤丸自動検出はできたが、認識結果が
  *   比較対象（初期配置 or 中断局の盤面）とmismatchCount箇所異なる場合。以前は即・手動
- *   タップへフォールバックしていたが、人間が見て「このまま進める（認識結果を正として
- *   対局開始）」か「手動タップで直す」かを選べるようにした。
+ *   タップへフォールバックしていたが、人間が見て選べるようにした。7回目UAT課題②再テストで
+ *   「①再撮影（撮影からやり直す）」「②駒修正済、対局へ（認識結果を正として対局開始）」
+ *   「③手動キャリブレーション（同じ写真への4隅タップ、透視変換のズレが原因の場合用）」の
+ *   3択（表示順は左から③②①）に変更。
  */
 @Composable
 private fun GridConfirmStep(
@@ -707,7 +705,8 @@ private fun GridConfirmStep(
     mismatchCount: Int,
     isResume: Boolean,
     onOk: () -> Unit,
-    onRetry: () -> Unit
+    onRetake: () -> Unit,
+    onManualCalibration: () -> Unit
 ) {
     Column(
         modifier = modifier.fillMaxSize(),
@@ -717,18 +716,22 @@ private fun GridConfirmStep(
             // 7回目UAT課題②：「手動タップで直す」という旧文言は、実際の原因が
             // ほぼ駒の配置ミス（人間が並べ間違えた）であって透視変換のズレではないのに、
             // タップ操作で直すかのように読めてしまうという指摘。「誤りがないか確認してください」
-            // という中立的な文言に変更し、ボタン側で「再撮影」を明示する形にした。
+            // という中立的な文言に変更した。
+            // 7回目UAT課題②再テスト：2ボタン（再撮影／このまま進める）では、透視変換自体の
+            // ズレが原因で誤って不一致になったケースに対応できないという指摘を受け、
+            // 「②駒修正済、対局へ」「③手動キャリブレーション」「①再撮影」の3ボタン構成に変更。
             text = if (isMismatchChoice) {
                 val target = if (isResume) "中断時点の盤面" else "初期配置"
-                // 7回目UAT課題⑥：「このまま進める」は今映っている（赤く示した）認識結果を
+                // 7回目UAT課題⑥：「②駒修正済、対局へ」は今表示されている（赤く示した）認識結果を
                 // そのまま対局開始時点の盤面として扱う——撮影後に駒を物理的に直しても、撮り直さ
-                // ない限りその変更はサーバに伝わらない。誤解して駒だけ直して「このまま進める」を
+                // ない限りその変更はサーバに伝わらない。誤解して駒だけ直してこのボタンを
                 // 押すと、対局開始時点の盤面が実際の盤面とズレたまま固定され、以降の指し手が
                 // 将棋ルール上ずっと不整合（エラー）になる、という報告があったため、何を確定する
                 // 操作なのかを文言で明示する。
                 "認識結果が${target}と${mismatchCount}マス異なります（赤色塗りつぶし部）。誤りがないか確認してください\n" +
-                    "「このまま進める」は今表示されている認識結果をそのまま対局開始時点の盤面として確定します。" +
-                    "駒を直した場合は撮り直さない限り反映されないため、「再撮影」を選んでください"
+                    "「駒修正済、対局へ」は今表示されている認識結果をそのまま対局開始時点の盤面として確定します。" +
+                    "駒を物理的に直した場合は撮り直さない限り反映されないため「再撮影」を、" +
+                    "盤と枠線がずれている等が原因と思われる場合は「手動キャリブレーション」を選んでください"
             } else {
                 "緑の線が盤のマスに正しく重なっているか確認してください"
             },
@@ -753,8 +756,15 @@ private fun GridConfirmStep(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
             horizontalArrangement = Arrangement.SpaceEvenly
         ) {
-            Button(onClick = onRetry) { Text(if (isMismatchChoice) "再撮影" else "やり直す") }
-            Button(onClick = onOk) { Text(if (isMismatchChoice) "このまま進める" else "OK（対局開始）") }
+            if (isMismatchChoice) {
+                // 7回目UAT課題②再テスト：左から③②①の順で並べる指定。
+                Button(onClick = onManualCalibration) { Text("手動キャリブレーション") }
+                Button(onClick = onOk) { Text("駒修正済、対局へ") }
+                Button(onClick = onRetake) { Text("再撮影") }
+            } else {
+                Button(onClick = onManualCalibration) { Text("やり直す") }
+                Button(onClick = onOk) { Text("OK（対局開始）") }
+            }
         }
     }
 }
